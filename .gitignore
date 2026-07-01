@@ -1,0 +1,34 @@
+# Secrets and local identity
+auth.json
+.credentials.json
+installation_id
+
+# Codex runtime state
+*.sqlite
+*.sqlite-shm
+*.sqlite-wal
+history.jsonl
+models_cache.json
+version.json
+.personality_migration
+
+# Runtime directories
+cache/
+log/
+sessions/
+shell_snapshots/
+tmp/
+.tmp/
+app-server-control/
+memories/
+
+# Installed standalone binaries
+packages/standalone/
+
+# Python caches
+__pycache__/
+*.py[cod]
+
+# Local backups generated during migration or hook edits
+*.bak-*
+backups/

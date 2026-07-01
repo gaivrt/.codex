@@ -1,0 +1,7 @@
+prefix_rule(pattern=["node", "/home/gaivr/.codex/skills/.system/openai-docs/scripts/fetch-codex-manual.mjs"], decision="allow")
+prefix_rule(pattern=["uv", "run"], decision="allow")
+prefix_rule(pattern=["ssh"], decision="allow")
+prefix_rule(pattern=["tmux", "ls"], decision="allow")
+prefix_rule(pattern=["tmux", "capture-pane"], decision="allow")
+prefix_rule(pattern=["tmux", "list-panes"], decision="allow")
+prefix_rule(pattern=["git", "clone"], decision="allow")

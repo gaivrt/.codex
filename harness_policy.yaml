@@ -1,0 +1,71 @@
+thresholds:
+  review_net_new_lines: 50
+  incremental_reminder_lines: 80
+  new_file_min_lines: 20
+  incremental_new_files: 3
+  large_change_lines: 100
+  large_change_new_files: 2
+
+enforcement:
+  default: remind
+  medium_change: remind
+  large_change: block
+  risky_change: block
+  harness_self_modification: block
+  missing_contract_for_large_change: block
+  missing_reviewer_for_large_change: block
+  missing_validation_for_large_change: block
+  missing_wiki_ingest: remind
+
+risky_paths:
+  - "hooks/**"
+  - "hooks.json"
+  - "harness_policy.yaml"
+  - ".codex/**"
+  - "AGENTS.md"
+  - "SCHEMA.md"
+  - "**/auth/**"
+  - "**/migrations/**"
+  - "**/deploy/**"
+  - "**/.github/workflows/**"
+  - "**/config*.toml"
+  - "**/config*.yaml"
+  - "**/config*.yml"
+  - "**/*sandbox*"
+  - "**/*permission*"
+
+harness_self_paths:
+  - "hooks/**"
+  - "hooks.json"
+  - "harness_policy.yaml"
+  - "AGENTS.md"
+  - "SCHEMA.md"
+
+generated_paths:
+  - ".git/**"
+  - ".mypy_cache/**"
+  - ".pytest_cache/**"
+  - ".ruff_cache/**"
+  - ".venv/**"
+  - "__pycache__/**"
+  - "build/**"
+  - "data/**"
+  - "dist/**"
+  - "node_modules/**"
+  - "probes/results/**"
+  - "scratch/**"
+  - "cache/**"
+  - "tmp/**"
+  - ".tmp/**"
+
+validation_commands:
+  - "pytest"
+  - "unittest"
+  - "py_compile"
+  - "ruff"
+  - "mypy"
+  - "tsc"
+  - "npm test"
+  - "bun test"
+  - "cargo test"
+  - "go test"

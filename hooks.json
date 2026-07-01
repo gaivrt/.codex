@@ -1,0 +1,54 @@
+{
+  "hooks": {
+    "UserPromptSubmit": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 /home/gaivr/.codex/hooks/codex_guard.py UserPromptSubmit",
+            "timeout": 5,
+            "statusMessage": "Checking wiki/GAN prompt rules"
+          }
+        ]
+      }
+    ],
+    "SessionStart": [
+      {
+        "matcher": "startup|resume|clear|compact",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 /home/gaivr/.codex/hooks/codex_guard.py SessionStart",
+            "timeout": 10,
+            "statusMessage": "Checking wiki session state"
+          }
+        ]
+      }
+    ],
+    "PostToolUse": [
+      {
+        "matcher": ".*",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 /home/gaivr/.codex/hooks/codex_guard.py PostToolUse",
+            "timeout": 10,
+            "statusMessage": "Tracking wiki/GAN edits"
+          }
+        ]
+      }
+    ],
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 /home/gaivr/.codex/hooks/codex_guard.py Stop",
+            "timeout": 10,
+            "statusMessage": "Recording wiki/GAN reminders"
+          }
+        ]
+      }
+    ]
+  }
+}
