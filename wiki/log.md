@@ -23,6 +23,10 @@ sources: []
 
 Reviewer 首轮返回 `FAIL` 后修复三项 blocking issue：Stop 在 objective blockers 未消除前持续 hard-block，`.github/workflows/**` 被识别为 risky path，existing valid contract 可跨 turn/restart 复用。测试扩展到 11 个用例并通过。
 
+## [2026-07-01 22:16] ingest | README harness overview
+
+更新 `README.md`，加入 Codex Loop Harness 设计 overview，说明 Bootstrap、Wiki Memory、Contract、Diff Telemetry、Review、Validation、Trace/Restart 分层，以及 `observe`、`remind`、`block` 三档 Stop enforcement。
+
 ## See Also
 
 - [Wiki Index](index.md)
