@@ -1,7 +1,7 @@
 ---
 title: Codex Loop Harness
 type: lifecycle-hook
-updated: 2026-07-01 20:56
+updated: 2026-07-01 23:18
 sources:
   - hooks.json
   - hooks/codex_guard.py
@@ -101,13 +101,20 @@ Trace records include prompt classification, session reminders, changed files, l
 
 `wiki/log.md` remains durable project history and does not receive noisy per-session trace.
 
+## Session Isolation
+
+Hook state keys are scoped by `session_id` plus the active turn id. The session identity resolver prefers explicit hook/session/thread ids, configured Codex session environment ids, transcript/session path UUIDs, and parent message ids.
+
+When those are missing, the harness may append a Codex parent process scope (`pid<id>-<start_time>`) only if the process tree identifies an actual Codex process. It intentionally does not use broad terminal-only variables such as `TMUX`, `WT_SESSION`, `STY`, `SSH_TTY`, or `TERM_SESSION_ID` as a cross-session identity. If no reliable identity exists, fallback state uses the hook process id plus process start time, or a per-process nonce when `/proc` is unavailable, and fails open rather than sharing stale gate state between concurrent sessions in the same terminal or cwd.
+
 ## Tests
 
-`tests/test_codex_guard.py` covers line-count review triggers, risky path triggers including CI workflow paths, generated/cache exclusions, repeated Stop blocking while objective requirements remain missing, large-change missing contract/review blocks, existing contract reuse, PASS review success, small-change reminder behavior, and wiki ingest reminder behavior.
+`tests/test_codex_guard.py` covers line-count review triggers, risky path triggers including CI workflow paths, generated/cache exclusions, session isolation fallback behavior, repeated Stop blocking while objective requirements remain missing, large-change missing contract/review blocks, existing contract reuse, PASS review success, small-change reminder behavior, and wiki ingest reminder behavior.
 
 ## See Also
 
 - [Harness Policy](../config/harness-policy.md)
 - [Stop Enforcement ADR](../decisions/adr-0001-stop-enforcement-policy.md)
 - [Codex Loop Harness Contract](../contracts/2026-07-01-codex-loop-harness.md)
+- [Session Isolation Contract](../contracts/2026-07-01-session-isolation-hardening.md)
 - [Runtime State](../ops/runtime-state.md)

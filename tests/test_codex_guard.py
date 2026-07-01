@@ -1,5 +1,6 @@
 import importlib.util
 import io
+import os
 import shutil
 import sys
 import tempfile
@@ -132,6 +133,56 @@ class CodexGuardHarnessTests(unittest.TestCase):
         self.assertFalse(codex_guard.should_track_gan_path(self.root, "cache/generated.py"))
         self.assertFalse(codex_guard.should_track_gan_path(self.root, "tmp/generated.py"))
         self.assertFalse(codex_guard.should_track_gan_path(self.root, "dist/generated.py"))
+
+    def test_session_id_keeps_explicit_sessions_separate(self) -> None:
+        first = dict(self.data, session_id="session-a")
+        second = dict(self.data, session_id="session-b")
+        self.assertNotEqual(codex_guard.session_id(first), codex_guard.session_id(second))
+        self.assertNotEqual(codex_guard.meta_path(first), codex_guard.meta_path(second))
+
+    def test_unknown_session_without_process_scope_fails_open_per_hook_process(self) -> None:
+        old_scope = codex_guard.codex_process_scope
+        saved_env = {key: os.environ.pop(key, None) for key in codex_guard.ENV_SESSION_ID_KEYS}
+        try:
+            codex_guard.codex_process_scope = lambda: None
+            session = codex_guard.session_id({"cwd": str(self.root)})
+        finally:
+            codex_guard.codex_process_scope = old_scope
+            for key, value in saved_env.items():
+                if value is not None:
+                    os.environ[key] = value
+        self.assertIn("unknown-cwd-", session)
+        self.assertIn(f"hookpid{os.getpid()}-", session)
+
+    def test_hook_process_scope_includes_process_start_time(self) -> None:
+        old_getpid = codex_guard.os.getpid
+        old_start = codex_guard.process_start_time
+        try:
+            codex_guard.os.getpid = lambda: 12345
+            codex_guard.process_start_time = lambda pid: "111"
+            first = codex_guard.hook_process_scope()
+            codex_guard.process_start_time = lambda pid: "222"
+            second = codex_guard.hook_process_scope()
+        finally:
+            codex_guard.os.getpid = old_getpid
+            codex_guard.process_start_time = old_start
+        self.assertEqual(first, "hookpid12345-111")
+        self.assertEqual(second, "hookpid12345-222")
+        self.assertNotEqual(first, second)
+
+    def test_codex_process_scope_ignores_terminal_only_scope(self) -> None:
+        old_getppid = codex_guard.os.getppid
+        saved_tmux = os.environ.get("TMUX")
+        try:
+            codex_guard.os.getppid = lambda: 1
+            os.environ["TMUX"] = "shared-terminal-scope"
+            self.assertIsNone(codex_guard.codex_process_scope())
+        finally:
+            codex_guard.os.getppid = old_getppid
+            if saved_tmux is None:
+                os.environ.pop("TMUX", None)
+            else:
+                os.environ["TMUX"] = saved_tmux
 
     def test_large_change_missing_contract_blocks(self) -> None:
         with codex_guard.locked_gan_state(self.data) as (_, state):

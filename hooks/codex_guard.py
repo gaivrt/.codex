@@ -448,6 +448,9 @@ def short_hash(value: Any) -> str:
     return sha1(str(value).encode("utf-8", errors="replace")).hexdigest()[:12]
 
 
+HOOK_PROCESS_NONCE: str | None = None
+
+
 def nested_values(data: dict[str, Any], keys: tuple[str, ...], *, include_plain_id: bool = False) -> Iterable[Any]:
     stack: list[tuple[dict[str, Any], bool]] = [(data, False)]
     seen: set[int] = set()
@@ -490,7 +493,16 @@ def looks_like_codex_process(argv: list[str]) -> bool:
     return False
 
 
+def process_start_time(pid: int) -> str | None:
+    try:
+        stat_parts = (Path("/proc") / str(pid) / "stat").read_text(errors="replace").split()
+    except OSError:
+        return None
+    return stat_parts[21] if len(stat_parts) > 21 else None
+
+
 def codex_process_scope() -> str | None:
+    """Return a Codex process scope only when it is process-specific."""
     pid = os.getppid()
     for _ in range(8):
         if pid <= 1:
@@ -515,11 +527,21 @@ def codex_process_scope() -> str | None:
         except (IndexError, ValueError):
             break
 
-    for key in ("WT_SESSION", "TMUX", "STY", "SSH_TTY", "TERM_SESSION_ID"):
-        value = os.environ.get(key)
-        if value:
-            return safe_id(f"{key.lower()}-{short_hash(value)}")
     return None
+
+
+def hook_process_scope() -> str:
+    """Return a hook-process lifetime scope for unknown session fallback."""
+    pid = os.getpid()
+    start_time = process_start_time(pid)
+    if start_time:
+        return safe_id(f"hookpid{pid}-{start_time}")
+
+    global HOOK_PROCESS_NONCE
+    if HOOK_PROCESS_NONCE is None:
+        entropy = f"{pid}-{datetime.now().isoformat()}-{os.urandom(8).hex()}"
+        HOOK_PROCESS_NONCE = short_hash(entropy)
+    return safe_id(f"hookpid{pid}-{HOOK_PROCESS_NONCE}")
 
 
 def session_id(data: dict[str, Any]) -> str:
@@ -560,7 +582,7 @@ def session_id(data: dict[str, Any]) -> str:
     elif base.startswith("unknown-cwd-"):
         # No reliable session/thread/process identity: keep the hook fail-open
         # rather than sharing state between concurrent terminals in one cwd.
-        base = f"{base}.hookpid{os.getpid()}"
+        base = f"{base}.{hook_process_scope()}"
     return safe_id(base)
 
 

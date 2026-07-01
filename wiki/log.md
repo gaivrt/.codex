@@ -1,7 +1,7 @@
 ---
 title: Wiki Log
 type: project-overview
-updated: 2026-07-01 20:56
+updated: 2026-07-01 23:18
 sources: []
 ---
 
@@ -26,6 +26,10 @@ Reviewer 首轮返回 `FAIL` 后修复三项 blocking issue：Stop 在 objective
 ## [2026-07-01 22:16] ingest | README harness overview
 
 更新 `README.md`，加入 Codex Loop Harness 设计 overview，说明 Bootstrap、Wiki Memory、Contract、Diff Telemetry、Review、Validation、Trace/Restart 分层，以及 `observe`、`remind`、`block` 三档 Stop enforcement。
+
+## [2026-07-01 23:18] ingest | Session isolation hardening
+
+修复 hook session fallback：移除 terminal-only scope，缺失可靠 session/process identity 时使用 hook process pid 加 start time 或 per-process nonce，避免不同 Codex session 共享 stale hook state。新增 session isolation contract、测试覆盖和 hook wiki 说明。
 
 ## See Also
 

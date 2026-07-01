@@ -1,7 +1,7 @@
 ---
 title: Wiki Index
 type: project-overview
-updated: 2026-07-01 20:22
+updated: 2026-07-01 23:18
 sources:
   - SCHEMA.md
   - README.md
@@ -28,6 +28,11 @@ sources:
 ## Contracts
 
 - [Codex Loop Harness Contract](contracts/2026-07-01-codex-loop-harness.md) — 本次 harness 升级的 scope、non-goals、acceptance criteria、validation 和 reviewer checklist。
+- [Session Isolation Hardening Contract](contracts/2026-07-01-session-isolation-hardening.md) — 防止缺失可靠 session identity 时跨 Codex session 共享 hook state 的修复 contract。
+
+## Reviews
+
+- [Session Isolation Hardening Review](reviews/2026-07-01-session-isolation-hardening-review.md) — reviewer 对 session isolation 修复的结构化 PASS 审查，记录初次 REVISE 与最终验证。
 
 ## Skills
 
