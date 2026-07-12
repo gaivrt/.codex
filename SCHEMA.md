@@ -80,17 +80,17 @@ wiki/
 
 ## Contract And Review Workflow
 
-1. Non-trivial code work should create or update `wiki/contracts/<YYYY-MM-DD>-<task-slug>.md` before implementation.
-2. Contract pages must include Original request, Scope, Non-goals, Acceptance criteria, Required validation, Risk class, and Reviewer checklist.
-3. Large or risky changes require a structured review artifact under `wiki/reviews/<YYYY-MM-DD>-<task-slug>-review.md`.
-4. Review pages must include Verdict, Contract coverage, Diff risk, Validation evidence, Issues, Required fixes before merge, and Wiki ingest check.
-5. Only `Verdict` values `PASS`, `FAIL`, and `NEEDS_HUMAN` are valid. Large/risky changes require `PASS` before Stop.
-6. Hard blocks are limited to objective missing artifacts/evidence; subjective design quality belongs in reviewer findings, not hook enforcement.
+1. Ordinary changes below 150 net-new lines need no contract. Architecture, risky, or `>=150` line work creates a short `wiki/contracts/<YYYY-MM-DD>-<task-slug>.md` before implementation.
+2. Contract pages contain only Original request, Scope, Non-goals, Acceptance criteria, Required validation, Risk class, and Reviewer checklist.
+3. Risky, security, performance-sensitive, or `>=300` line changes use a reviewer and a concise `wiki/reviews/<YYYY-MM-DD>-<task-slug>-review.md`.
+4. Review pages link the contract and contain only Verdict, contract coverage, concrete validation evidence, blocking issues, residual risk, required fixes, and wiki check.
+5. Valid verdicts are `PASS`, `FAIL`, and `NEEDS_HUMAN`. Only risky changes hard-block on missing objective contract, validation, or PASS review evidence.
+6. Ordinary new files do not trigger review by themselves. Planning and discussion never trigger gates without concrete code telemetry.
 
 ## Ingest Workflow
 
-1. Main agent 判断需要 ingest 的 source 文件和原因。
-2. Main agent 优先将 ingest 委托给 wiki-ingest subagent；如果 subagent 不可用或用户要求单 agent，main agent 可直接执行。
+1. Main agent 判断 source 变化是否产生长期有效的新知识；trivial 或 runtime-only 变化不 ingest。
+2. 小而集中的 ingest 由 main agent 直接完成；大型、跨模块或已委托的实现才优先使用 wiki-ingest subagent。
 3. 读取 source 前先检查它是否属于默认排除范围：凭据、数据库、会话历史、cache、tmp、standalone binaries。
 4. 对默认排除文件，只写角色说明或维护策略，不读取或摘录敏感/运行态内容。
 5. 对可 ingest 文件，完整读取 source，创建或更新对应 wiki 页面，并链式更新 overview、index 或相关概念页。
@@ -122,11 +122,10 @@ wiki/
 
 ## Query Workflow
 
-1. 读 `wiki/index.md` 定位相关页面。
-2. 读取相关 wiki 页面。
-3. 如果 wiki 信息不足，回溯到源文件。
-4. 回答时区分 wiki 已记录内容、源文件事实和当前推断。
-5. 如果产生长期有用的新分析，询问是否写入 wiki。
+1. 每个 session/worktree 首次 codebase 任务读取 `SCHEMA.md` 与 `wiki/index.md`；未变化时不重复读取。
+2. 每个问题先读取最多一个相关 wiki 页面；不足时再展开或回溯源文件。
+3. 回答时区分 wiki 已记录内容、源文件事实和当前推断。
+4. 只有长期有用的新分析才询问是否写入 wiki。
 
 ## Lint Checklist
 

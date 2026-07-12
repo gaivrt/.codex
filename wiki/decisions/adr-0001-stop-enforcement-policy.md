@@ -1,7 +1,7 @@
 ---
 title: ADR-0001 Stop Enforcement Policy
 type: decision
-updated: 2026-07-01 20:46
+updated: 2026-07-12 22:59
 sources:
   - hooks/codex_guard.py
   - harness_policy.yaml
@@ -16,37 +16,39 @@ Accepted
 
 ## Context
 
-The original harness had two gates: wiki ingest reminders and GAN-style reviewer reminders. The implementation contained hard-block capable functions, but `hook_stop()` called them in reminder-only mode. This created a mismatch between the intended discipline for large real code edits and the repository hook behavior.
-
-The harness now needs to support long-running Codex work where objective missing requirements can stop the agent before it exits, while subjective quality judgments remain the reviewer's responsibility.
+The first strict harness made large and risky changes share a full contract/review/validation closure. Repeated wiki bootstrap, prompt-driven guidance, low size/new-file thresholds, and user-facing Stop reminders imposed disproportionate token and workflow cost on ordinary personal-repository work.
 
 ## Decision
 
-Stop enforcement uses three modes:
+Policy still exposes three modes:
 
 - `observe`: record trace only.
-- `remind`: emit additional context but return success.
-- `block`: return `2` on the first missing objective requirement so the agent must continue work.
+- `remind`: emit concise tool-time guidance.
+- `block`: public Stop emits one `{"decision":"block","reason":"..."}` object and returns success so Codex continues.
 
-Small or low-risk changes remain observe/remind by default. Large or risky changes hard-block when objective artifacts are missing:
+The default path is silent. Ordinary changes below 150 net-new attributed lines need no artifact. At 150 lines contract becomes advisory; at 300 lines review becomes advisory. New-file status alone does not activate review, and ordinary size-only changes do not emit Stop output.
+
+Only strict risky/security/performance changes hard-block on objective omissions:
 
 - no valid contract under `wiki/contracts/`;
 - no structured review under `wiki/reviews/`;
-- review verdict is `FAIL` or `NEEDS_HUMAN`;
+- current review verdict is absent, `FAIL`, or `NEEDS_HUMAN`;
 - no validation evidence was observed.
 
-Wiki ingest remains reminder-only by default, but the policy file can raise it to block for stricter projects.
+Wiki ingest is `observe` by default. Planning/discussion cannot trigger a gate without attributed code telemetry. Bootstrap guidance is stored per session/worktree with schema/index content hashes and repeats only when scope or content changes.
 
 ## Rationale
 
 Hard blocks should only enforce facts the harness can verify: artifacts, verdict values, validation commands, diff telemetry, and wiki log/index/page updates. The hook should not hard-block subjective quality judgments such as elegance, naming taste, or whether an alternative architecture might be nicer.
 
-Large/risky edits are different from small edits because the expected damage from missing process is higher. Risk can come from size, path, or self-modification of the harness itself.
+Hard blocks are reserved for changes where the expected damage is tied to enforcement, security, permissions, deployment, migration, CI, or explicit security/performance intent. Size remains useful for process guidance but is not sufficient reason to prevent completion.
 
 ## Consequences
 
-- Agents must create a contract before substantial implementation work.
-- Reviewers must write structured review artifacts for large/risky changes.
+- Agents receive at most one short nudge when an ordinary change crosses the 150/300 thresholds.
+- Risky changes still require a short contract, validation, and a concise current PASS review.
+- `AGENTS.md`, `SCHEMA.md`, ordinary docs, and general config are not hard-risk by path alone.
+- Small focused wiki updates may be performed by the main agent; missing wiki ingest is silent by default.
 - `wiki/log.md` remains durable project history; noisy per-session trace goes to `~/.codex/tmp/hooks/<session_id>/trace.jsonl`.
 - `harness_policy.yaml` controls thresholds, risky paths, generated paths, validation markers, and enforcement mode.
 

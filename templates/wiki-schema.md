@@ -54,21 +54,18 @@ wiki/
 
 <!-- init 时可根据项目特化。以下为通用流程 -->
 
-1. Main agent 判断需要 ingest 的 source 文件和原因
-2. Main agent 将 ingest 委托给 wiki-ingest subagent（除非用户要求单 agent 执行或 subagent 不可用）
-3. wiki-ingest subagent 完整读取 source 文件
-4. wiki-ingest subagent 写新 wiki 页面或更新已有页面，并链式更新受影响页面
-5. wiki-ingest subagent 更新 `wiki/index.md`
-6. wiki-ingest subagent 在 `wiki/log.md` 追加记录
-7. Main agent 验收覆盖范围，必要时集成 subagent 变更，然后回到原任务
+1. Main agent 判断 source 变化是否产生长期知识；trivial 或 runtime-only 变化不 ingest
+2. 小而集中的 ingest 由 main agent 直接完成；大型或跨模块 ingest 才委托 focused subagent
+3. 完整读取目标 source，更新相关 wiki 页面，并链式更新受影响页面
+4. 更新 `wiki/index.md`，在 `wiki/log.md` 追加一条简洁记录
+5. Main agent 验收覆盖范围，然后回到原任务
 
 ## Query Workflow
 
-1. 读 `wiki/index.md` 定位相关页面
-2. 读取相关 wiki 页面
-3. 如果 wiki 信息不足，回溯到源文件或代码
-4. 回答问题
-5. 有价值的新分析可（征求用户同意后）存入 wiki
+1. 每个 session/worktree 首次任务读取 schema 与 `wiki/index.md`，未变化时不重复读取
+2. 每个问题先读取最多一个相关 wiki 页面
+3. 信息不足时再展开或回溯源文件
+4. 回答问题；只有长期有用的新分析才征求是否写入 wiki
 
 ## Lint Checklist
 

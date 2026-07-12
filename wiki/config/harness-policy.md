@@ -1,7 +1,7 @@
 ---
 title: Harness Policy
 type: codex-config
-updated: 2026-07-01 20:56
+updated: 2026-07-12 22:59
 sources:
   - harness_policy.yaml
   - hooks/codex_guard.py
@@ -13,45 +13,40 @@ sources:
 
 ## Thresholds
 
-- `review_net_new_lines`: net new lines that require review.
-- `incremental_reminder_lines`: additional lines since last review that trigger another reminder.
-- `new_file_min_lines`: minimum new-file size counted as review-relevant.
-- `incremental_new_files`: new-file count since last review that triggers another reminder.
-- `large_change_lines`: net new lines that classify a change as large.
-- `large_change_new_files`: new-file count that classifies a change as large.
+- `contract_net_new_lines: 150`: ordinary code changes at or above this size need a short contract.
+- `review_net_new_lines: 300`: ordinary code changes at or above this size need a reviewer.
+- `incremental_reminder_lines: 300`: after review, another 300 attributed lines can request a checkpoint re-review.
+- `new_file_min_lines: 80`: only controls which new files enter incremental telemetry; a new file does not trigger review by itself.
+- `incremental_new_files: 5`: five qualifying files since review can request a checkpoint re-review.
+- `large_change_lines: 300`: classifies the size tier used by telemetry.
+- `large_change_new_files: 999`: effectively disables ordinary new-file-count classification as a standalone gate.
 
 ## Enforcement Modes
 
-Supported modes:
+Supported policy modes are:
 
 - `observe`
 - `remind`
 - `block`
 
-Current policy keeps default and medium changes in reminder mode, while large, risky, and harness self-modifying changes can block when objective requirements are missing.
+The default and medium tiers are `observe`. Contract/review size thresholds create one short `PostToolUse` nudge; ordinary large changes remain advisory and Stop is silent. Risky or harness-self changes use `block`, and only objective missing contract, PASS review, or validation evidence becomes a Stop blocker. A changed review with `FAIL` or `NEEDS_HUMAN` also blocks strict changes.
 
-Known missing requirements that can block:
-
-- contract missing for large/risky change;
-- review artifact missing for large/risky change;
-- validation evidence missing for large/risky change;
-- review verdict is `FAIL` or `NEEDS_HUMAN`.
-
-Wiki ingest remains reminder-only by default.
+Missing wiki ingest is `observe`, so it records state without user-facing Stop output.
 
 ## Risky Paths
 
-Risk patterns include:
+Hard-risk patterns include:
 
-- `hooks/**`, `hooks.json`, `harness_policy.yaml`
-- `AGENTS.md`, `SCHEMA.md`
-- auth, migration, deploy, CI, config, sandbox, and permission-related paths
+- `hooks/**`, `hooks.json`, `harness_policy.yaml`, `.codex/**`
+- auth, migration, deploy, CI workflow, sandbox, and permission-related paths
 
-Harness self-modification is tracked separately so even tiny changes to hook/policy/bootstrap/schema files can require the stricter gate.
+Harness self-modification is the narrower `hooks/**`, `hooks.json`, and `harness_policy.yaml` set. `AGENTS.md`, `SCHEMA.md`, ordinary documentation, and general configuration are not hard-risk by path alone.
+
+Risk, architecture, and security/performance prompt signals only matter after concrete code telemetry exists. Planning or discussion alone cannot activate a gate.
 
 ## Generated Paths
 
-Generated/cache paths such as `.git/**`, cache/tmp directories, build/dist outputs, virtualenvs, bytecode caches, and node modules are ignored by diff telemetry.
+Generated/cache paths such as `.git/**`, cache/tmp directories, build/dist outputs, virtualenvs, bytecode caches, node modules, data, probes, and scratch are ignored by diff telemetry.
 
 ## Validation Markers
 

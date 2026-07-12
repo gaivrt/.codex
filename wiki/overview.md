@@ -1,7 +1,7 @@
 ---
 title: Codex Home Overview
 type: project-overview
-updated: 2026-07-01 20:56
+updated: 2026-07-12 22:59
 sources:
   - SCHEMA.md
   - AGENTS.md
@@ -26,13 +26,13 @@ sources:
 
 | 路径 | 角色 |
 |---|---|
-| `AGENTS.md` | 全局 Codex 行为约定，包括沟通风格、工程规则、wiki workflow、GAN review workflow |
+| `AGENTS.md` | 精简的全局行为约定：session bootstrap、lean gate、artifact ownership、wiki ingest、安全与工程规则 |
 | `README.md` | 仓库说明、提交边界、常用 Git 检查命令 |
 | `.gitignore` | 排除 secrets、runtime state、cache、standalone binaries、备份文件 |
 | `config.toml` | Codex 主配置：模型、provider、trusted projects、MCP servers、hook trust state |
 | `hooks.json` | Codex lifecycle hooks 入口配置 |
 | `harness_policy.yaml` | Codex Loop Harness policy：阈值、enforcement modes、risky/generated paths、validation markers |
-| `hooks/codex_guard.py` | Codex Loop Harness 主实现：wiki memory、contract gate、diff telemetry、review gate、trace/restart |
+| `hooks/codex_guard.py` | Lean Harness 主实现：一次性 wiki bootstrap、tool-evidenced telemetry、150/300 process tiers、strict-risk Stop gate、trace/restart |
 | `rules/default.rules` | 已批准的命令前缀规则 |
 | `skills/.system/` | 安装的 system skills、引用文档、脚本和资产 |
 | `tests/test_codex_guard.py` | harness 行为测试 |
@@ -73,6 +73,14 @@ Wiki 负责维护这个目录的长期知识：
 - 模板说明：`templates/` 中的可复用模板如何使用。
 - 运行维护：哪些文件是运行态，哪些文件应该被 Git 和 wiki 排除。
 - 决策记录：影响未来维护的 durable decisions。
+
+## Lean Maintenance Model
+
+- 每个 session/worktree 首次非 trivial 工作读取 `SCHEMA.md` 与 `wiki/index.md`；内容和 scope 未变化时不重复读取。
+- 普通 `<150` 行代码改动无 contract/reviewer；`>=150` 行需要短 contract，`>=300` 行需要 review，但 size-only Stop 保持静默。
+- Hook enforcement/policy、auth、sandbox、permission、migration、deploy 和 CI 等 strict-risk 改动缺 contract、validation 或 current PASS review 时才 hard-block。
+- 小而集中的 durable knowledge 由主 agent 直接 ingest；大型或跨模块 ingest 才委托 subagent。
+- Contract 定义目标，review 保存结论和证据，wiki 只维护当前行为，log 只追加一条简洁历史记录。
 
 ## Maintenance Rules
 

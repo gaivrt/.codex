@@ -33,11 +33,11 @@ Bootstrap -> Contract -> Work -> Verify -> Review -> Ingest -> Trace -> Restart
 
 | 层 | 位置 | 作用 |
 |---|---|---|
-| Bootstrap | `AGENTS.md`、`SessionStart` | 启动时要求先读 `SCHEMA.md` 和 `wiki/index.md` |
+| Bootstrap | `AGENTS.md`、session state | 每个 session/worktree 只读一次 `SCHEMA.md` 和 `wiki/index.md`；内容变化时才重读 |
 | Wiki Memory | `SCHEMA.md`、`wiki/index.md`、`wiki/**` | 把长期项目知识写到磁盘，不依赖上下文记忆 |
-| Contract | `wiki/contracts/*.md` | 非平凡任务先定义 scope、non-goals、acceptance criteria、validation |
-| Diff Telemetry | `hooks/codex_guard.py` | 用 Git/filesystem snapshot 观察真实文件变化，不信 agent 自述 |
-| Review | `wiki/reviews/*-review.md` | 大改动或 risky 改动需要结构化 review artifact，`Verdict` 必须为 `PASS` |
+| Contract | `wiki/contracts/*.md` | 架构、risky 或至少 150 net-new lines 的任务定义目标和验收边界 |
+| Diff Telemetry | `hooks/codex_guard.py` | 只把 structured file-tool input 明确声明的路径归属给当前 turn |
+| Review | `wiki/reviews/*-review.md` | risky、安全、性能或至少 300 net-new lines 的改动使用 reviewer |
 | Validation | shell command markers + 自动 `py_compile` | 记录测试、lint、typecheck、smoke test 等客观证据 |
 | Trace/Restart | `~/.codex/tmp/hooks/<session_id>/trace.jsonl`、`state.json` | 保存每轮 gate、diff、validation、Stop decision，方便复盘和恢复 |
 
@@ -46,10 +46,10 @@ Stop enforcement 有三档：
 | 模式 | 行为 |
 |---|---|
 | `observe` | 只写 trace |
-| `remind` | 给 Codex 追加上下文提醒，但不阻止退出 |
-| `block` | 对客观缺失项返回 `2`，要求继续补齐 |
+| `remind` | 阈值首次到达时输出一条短提示，不在 Stop 重复 |
+| `block` | Stop 输出 `decision: block` JSON，要求补齐客观 risky-change 缺失项 |
 
-当前 policy 让小/中改动保持 reminder-oriented；large、risky、harness self-modification 在缺少 contract、PASS review 或 validation evidence 时 hard-block。主观质量问题交给 reviewer，不由 hook 直接判定。
+当前 policy 默认静默：普通新文件不单独触发 review，普通 large change 也不会在 Stop 阻断；只有 risky/harness self、安全或性能敏感改动缺少 contract、PASS review 或 validation evidence 时 hard-block。Planning/discussion 不触发 gate，主观质量问题仍交给 reviewer。
 
 运行 harness 测试：
 

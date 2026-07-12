@@ -7,7 +7,7 @@
             "type": "command",
             "command": "python3 /home/gaivr/.codex/hooks/codex_guard.py UserPromptSubmit",
             "timeout": 5,
-            "statusMessage": "Checking wiki/GAN prompt rules"
+            "statusMessage": "Checking harness bootstrap"
           }
         ]
       }
@@ -20,7 +20,7 @@
             "type": "command",
             "command": "python3 /home/gaivr/.codex/hooks/codex_guard.py SessionStart",
             "timeout": 10,
-            "statusMessage": "Checking wiki session state"
+            "statusMessage": "Checking harness state"
           }
         ]
       }
@@ -33,7 +33,7 @@
             "type": "command",
             "command": "python3 /home/gaivr/.codex/hooks/codex_guard.py PostToolUse",
             "timeout": 10,
-            "statusMessage": "Tracking wiki/GAN edits"
+            "statusMessage": "Tracking harness edits"
           }
         ]
       }
@@ -45,7 +45,7 @@
             "type": "command",
             "command": "python3 /home/gaivr/.codex/hooks/codex_guard.py Stop",
             "timeout": 10,
-            "statusMessage": "Recording wiki/GAN reminders"
+            "statusMessage": "Checking risky-change gates"
           }
         ]
       }

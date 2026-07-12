@@ -1,36 +1,34 @@
 thresholds:
-  review_net_new_lines: 50
-  incremental_reminder_lines: 80
-  new_file_min_lines: 20
-  incremental_new_files: 3
-  large_change_lines: 100
-  large_change_new_files: 2
+  contract_net_new_lines: 150
+  review_net_new_lines: 300
+  incremental_reminder_lines: 300
+  new_file_min_lines: 80
+  incremental_new_files: 5
+  large_change_lines: 300
+  large_change_new_files: 999
 
 enforcement:
-  default: remind
-  medium_change: remind
-  large_change: block
+  default: observe
+  contract_change: remind
+  review_change: remind
+  medium_change: observe
+  large_change: remind
   risky_change: block
   harness_self_modification: block
-  missing_contract_for_large_change: block
-  missing_reviewer_for_large_change: block
-  missing_validation_for_large_change: block
-  missing_wiki_ingest: remind
+  missing_contract_for_risky_change: block
+  missing_reviewer_for_risky_change: block
+  missing_validation_for_risky_change: block
+  missing_wiki_ingest: observe
 
 risky_paths:
   - "hooks/**"
   - "hooks.json"
   - "harness_policy.yaml"
   - ".codex/**"
-  - "AGENTS.md"
-  - "SCHEMA.md"
   - "**/auth/**"
   - "**/migrations/**"
   - "**/deploy/**"
   - "**/.github/workflows/**"
-  - "**/config*.toml"
-  - "**/config*.yaml"
-  - "**/config*.yml"
   - "**/*sandbox*"
   - "**/*permission*"
 
@@ -38,8 +36,6 @@ harness_self_paths:
   - "hooks/**"
   - "hooks.json"
   - "harness_policy.yaml"
-  - "AGENTS.md"
-  - "SCHEMA.md"
 
 generated_paths:
   - ".git/**"
