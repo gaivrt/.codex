@@ -1,7 +1,7 @@
 ---
 title: Wiki Log
 type: project-overview
-updated: 2026-07-12 23:06
+updated: 2026-07-13 13:46
 sources: []
 ---
 
@@ -50,6 +50,14 @@ Ingest `hooks/codex_guard.py` 与 `tests/test_codex_guard.py` 的 worktree scope
 ## [2026-07-12 23:06] review | Lean Harness PASS
 
 独立 reviewer 验证 150/300 分层、bootstrap 去重、ordinary silent Stop、strict-risk blocker 与既有 isolation/loop guard；34 tests、py_compile 和 scoped diff check 通过，无 blocking issue。
+
+## [2026-07-13 13:29] ingest | Risk-only Harness V3
+
+移除 line-count/new-file gates、全仓库 snapshots、shell validation surveillance、自动 compile、wiki Stop gate 和 incremental review；ordinary work 无论大小保持静默，只有 governed path/token 或明确 sensitive implementation intent 配合 structured code/config write 时要求本轮 contract 与 fresh bound PASS review。PostToolUse matcher 收窄到 structured file tools，并识别旧 V2 bootstrap state 以提示重启 session。Artifact current/freshness 使用 content hash，拒绝 mtime touch 与 conflicting validation result。External-operation authorization/receipt 独立处理。同步 AGENTS、SCHEMA、README、policy、hook、30 个边界测试、overview、policy page、hook page、ADR 和 index。
+
+## [2026-07-13 13:46] review | Risk-only Harness V3 PASS
+
+同一 reviewer 首轮指出 auth classifier 边界、conflicting non-zero validation 和 mtime-only freshness 三项 blocker；修复后 7 个 focused regressions 与 30-test final checkpoint 通过，review artifact 的最终 `Verdict` 为 `PASS`，无剩余 blocking issue。
 
 ## See Also
 

@@ -20,19 +20,17 @@ When the project root contains `SCHEMA.md`:
 
 Do not rely on memory across sessions. `AGENTS.md` controls behavior; `SCHEMA.md` controls durable knowledge structure.
 
-## Lean Harness
+## Risk-Only Harness
 
-The default path is silent. Process expands only with actual code changes:
+The default path is silent. Change size, ordinary new files, planning, and discussion never trigger process gates.
 
-- Ordinary changes below 150 net-new lines: no contract or reviewer.
-- At least 150 net-new lines, architecture changes, or risky changes: create a short contract under `wiki/contracts/`.
-- At least 300 net-new lines, risky paths, security changes, or performance-sensitive changes: use a reviewer.
-- Ordinary new files do not trigger review by themselves.
-- Planning and discussion do not trigger gates; concrete file-tool telemetry does.
-- Small and medium ordinary changes never hard-block at Stop.
-- Risky changes may hard-block only on objective missing contract, validation, or PASS review evidence.
+- Ordinary implementation needs no contract or reviewer, regardless of line count.
+- Governed implementation requires a short contract under `wiki/contracts/` and one coherent reviewer pass after implementation and targeted validation are complete.
+- Governed paths include hook enforcement, harness policy, auth, sandbox, permissions, migrations, deploy, and CI. An explicit security, permission, deployment, migration, CI, or performance-sensitive implementation request is also governed when paired with a concrete code/config write.
+- Ordinary `AGENTS.md`, `SCHEMA.md`, documentation, and general config edits are not governed by path alone.
+- Stop may hard-block only a governed turn with an objectively missing current contract or current PASS review containing explicit validation evidence.
 
-Risky paths include hook enforcement, harness policy, auth, sandbox, permissions, migrations, deploy, and CI. Ordinary `AGENTS.md`, `SCHEMA.md`, documentation, and general config edits are not hard-risk by path alone.
+External operations are a separate control plane: obtain any required user authorization, state scope or budget when material, and report an execution receipt. An external operation alone does not require a code contract or review artifact.
 
 ## Artifact Ownership
 
@@ -71,6 +69,7 @@ Before Git-managed checkpoints, check for stale pages, contradictions, orphan pa
 - Before implementation, inspect project structure, package manager, config pattern, and directory conventions.
 - For bug fixes, prefer a failing test first, then iterate until it passes.
 - Define success with tests or other concrete validation.
+- During iteration, run the narrowest relevant test. At a coherent checkpoint, run the related suite once; reserve full-suite validation for governed, release, commit, or explicitly requested work.
 - Prefer the simplest correct implementation; avoid speculative wrappers, factories, and managers.
 - Keep edits scoped. Report unrelated problems instead of fixing them silently.
 - Surface ambiguous requirements and meaningful tradeoffs instead of inventing requirements.
@@ -80,16 +79,16 @@ Before Git-managed checkpoints, check for stale pages, contradictions, orphan pa
 
 ## Review Workflow
 
-For qualifying changes, use a short-lived reviewer after a coherent checkpoint. Review priorities:
+For governed changes, use one short-lived reviewer after a coherent checkpoint. Do not review incremental fragments. Review priorities:
 
 1. Correctness and edge cases.
 2. Security and permission boundaries.
 3. Architecture consistency.
 4. Performance impact.
 
-The reviewer returns `PASS`, `REVISE: <blocking issues>`, or `ESCALATE`. On `REVISE`, fix and re-review up to three rounds. Risky or large reviewed changes require a concise `wiki/reviews/*-review.md` artifact with `Verdict: PASS` before completion.
+The reviewer returns `PASS`, `FAIL: <blocking issues>`, or `NEEDS_HUMAN`. On `FAIL`, fix only the blockers and ask the same reviewer to re-check, with at most two focused re-checks. Governed changes require a concise `wiki/reviews/*-review.md` artifact with `Verdict: PASS` before completion.
 
-Do not require reviewers for small bug fixes, style changes, docs-only work, or ordinary config edits.
+Do not require reviewers for ordinary work based on size, or for small bug fixes, style changes, docs-only work, and ordinary config edits.
 
 ## Git
 

@@ -1,10 +1,11 @@
 ---
 title: ADR-0001 Stop Enforcement Policy
 type: decision
-updated: 2026-07-12 22:59
+updated: 2026-07-13 13:29
 sources:
   - hooks/codex_guard.py
   - harness_policy.yaml
+  - AGENTS.md
   - SCHEMA.md
 ---
 
@@ -12,48 +13,50 @@ sources:
 
 ## Status
 
-Accepted
+Accepted — superseded by the Harness V3 decision below.
 
 ## Context
 
-The first strict harness made large and risky changes share a full contract/review/validation closure. Repeated wiki bootstrap, prompt-driven guidance, low size/new-file thresholds, and user-facing Stop reminders imposed disproportionate token and workflow cost on ordinary personal-repository work.
+Earlier harness versions used repository snapshots, attributed line counts, 150/300 thresholds, validation-command detection, incremental reminders, automatic compilation, and wiki/reviewer state tracking. Even when size-only Stop stayed advisory, agents still spent time creating artifacts and repeatedly running tests for ordinary work. Recent session records also showed that most PostToolUse events had no file delta, so full snapshots imposed cost without useful evidence.
+
+Artifact presence was not enough either: an unrelated old contract or PASS review could appear valid, and shell command matching did not prove that the recorded validation covered the reviewed change.
 
 ## Decision
 
-Policy still exposes three modes:
+Harness V3 uses a risk-only governed workflow.
 
-- `observe`: record trace only.
-- `remind`: emit concise tool-time guidance.
-- `block`: public Stop emits one `{"decision":"block","reason":"..."}` object and returns success so Codex continues.
+- Line count, ordinary new files, architecture discussion, and task size never trigger a contract or reviewer.
+- A turn becomes governed only through an objective governed path, or through explicit sensitive implementation intent paired with a structured code/config write.
+- Governed work needs one short current contract and one coherent current PASS review after implementation and targeted validation.
+- Stop blocks only when either artifact is objectively missing or invalid. All unexpected hook failures remain fail-open.
+- External-operation authorization, scope/budget, and execution receipts are handled separately; an operation alone does not create code-review artifacts.
 
-The default path is silent. Ordinary changes below 150 net-new attributed lines need no artifact. At 150 lines contract becomes advisory; at 300 lines review becomes advisory. New-file status alone does not activate review, and ordinary size-only changes do not emit Stop output.
+The hook does not scan the repository after every tool call. It accepts file ownership only from structured ApplyPatch/Write/Edit-style inputs. Bash command text is never parsed as path evidence.
 
-Only strict risky/security/performance changes hard-block on objective omissions:
+For a governed Stop to pass:
 
-- no valid contract under `wiki/contracts/`;
-- no structured review under `wiki/reviews/`;
-- current review verdict is absent, `FAIL`, or `NEEDS_HUMAN`;
-- no validation evidence was observed.
-
-Wiki ingest is `observe` by default. Planning/discussion cannot trigger a gate without attributed code telemetry. Bootstrap guidance is stored per session/worktree with schema/index content hashes and repeats only when scope or content changes.
+1. the contract content was created or changed after the turn baseline and has all required headings;
+2. the review content was created or changed after that baseline;
+3. the review links that exact current contract, has all required headings and `Verdict: PASS`;
+4. the review records an explicit validation `Command:` and a successful `Result:` without a conflicting failure/non-zero exit;
+5. the review content hash differs from the snapshot taken after the last governed code/config edit.
 
 ## Rationale
 
-Hard blocks should only enforce facts the harness can verify: artifacts, verdict values, validation commands, diff telemetry, and wiki log/index/page updates. The hook should not hard-block subjective quality judgments such as elegance, naming taste, or whether an alternative architecture might be nicer.
+Process should expand only where omission has a clear downside: enforcement, auth/security, permissions/sandboxing, migrations/deployment, CI, or explicitly performance-sensitive implementation. Size is a poor proxy for these risks and caused ceremony on otherwise ordinary work.
 
-Hard blocks are reserved for changes where the expected damage is tied to enforcement, security, permissions, deployment, migration, CI, or explicit security/performance intent. Size remains useful for process guidance but is not sufficient reason to prevent completion.
+Content freshness and binding are stronger evidence than command surveillance or mtime. They allow the reviewer to choose risk-proportionate validation while preventing stale, touched-only, or unrelated artifacts from satisfying the gate.
 
 ## Consequences
 
-- Agents receive at most one short nudge when an ordinary change crosses the 150/300 thresholds.
-- Risky changes still require a short contract, validation, and a concise current PASS review.
-- `AGENTS.md`, `SCHEMA.md`, ordinary docs, and general config are not hard-risk by path alone.
-- Small focused wiki updates may be performed by the main agent; missing wiki ingest is silent by default.
-- `wiki/log.md` remains durable project history; noisy per-session trace goes to `~/.codex/tmp/hooks/<session_id>/trace.jsonl`.
-- `harness_policy.yaml` controls thresholds, risky paths, generated paths, validation markers, and enforcement mode.
+- Ordinary work is silent regardless of size and can use targeted tests without mandatory full-suite repetition.
+- Governed work receives at most one short PostToolUse nudge and one final review cycle; only blocking fixes receive focused re-checks.
+- Per-turn state stores declared paths, governed flags, artifact baselines, worktree identity, and last review-relevant edit time—not repository snapshots or line totals.
+- Trace is sparse: governed activation and governed Stop outcomes only.
+- Policy changes prompt a new session because already-loaded `AGENTS.md` instructions cannot be retroactively replaced.
 
 ## See Also
 
 - [Codex Guard](../hooks/codex-guard.md)
-- [Codex Loop Harness Contract](../contracts/2026-07-01-codex-loop-harness.md)
+- [Harness V3 Contract](../contracts/2026-07-13-risk-only-harness-v3.md)
 - [Wiki Log](../log.md)

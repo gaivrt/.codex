@@ -2,13 +2,14 @@ import importlib.util
 import io
 import json
 import os
+import re
 import shutil
-import subprocess
 import sys
 import tempfile
 import unittest
-from contextlib import redirect_stderr, redirect_stdout
+from contextlib import redirect_stdout
 from pathlib import Path
+from unittest import mock
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -19,73 +20,47 @@ sys.modules[SPEC.name] = codex_guard
 SPEC.loader.exec_module(codex_guard)
 
 
-CONTRACT_TEXT = """---
-title: Contract
----
-
-# Contract: test
+CONTRACT_TEXT = """# Contract: test
 
 ## Original request
-Implement a test change.
+Implement the governed change.
 
 ## Scope
-hooks only.
+Only the requested harness behavior.
 
 ## Non-goals
-No unrelated edits.
+No unrelated changes.
 
 ## Acceptance criteria
-- [ ] works
+- Governed behavior works.
 
 ## Required validation
-- [ ] unittest
+- Run the harness tests.
 
 ## Risk class
-risky
+Governed harness policy.
 
 ## Reviewer checklist
-- [ ] pass
+- Check correctness and enforcement boundaries.
 """
 
 
-REVIEW_PASS_TEXT = """---
-title: Review
----
-
-# Review: test
-
-## Verdict
-PASS
-
-## Contract coverage
-Covered.
-
-## Diff risk
-Reviewed.
-
-## Validation evidence
-unittest
-
-## Issues
-None.
-
-## Required fixes before merge
-None.
-
-## Wiki ingest check
-Done.
-"""
-
-REVIEW_LEAN_PASS_TEXT = """# Review: lean
-
-## Verdict
-PASS
+def review_text(contract: str = "wiki/contracts/test.md", *, explicit_validation: bool = True) -> str:
+    validation = (
+        "- Command: `python3 -m unittest discover -s tests`\n- Result: PASS (exit 0)"
+        if explicit_validation
+        else "Tests looked good."
+    )
+    return f"""# Review: test
 
 ## Contract
-wiki/contracts/test.md
+[{contract}]({contract})
+
+## Verdict
+PASS
 
 ## Validation evidence
-unittest passed.
+{validation}
 
 ## Blocking issues
 None.
@@ -97,469 +72,325 @@ None.
 None.
 
 ## Wiki check
-Done.
+Current.
 """
 
 
-class CodexGuardHarnessTests(unittest.TestCase):
+class CodexGuardV3Tests(unittest.TestCase):
     def setUp(self) -> None:
         self.tmp = Path(tempfile.mkdtemp())
-        self.state = self.tmp / "state"
+        self.state_dir = self.tmp / "state"
         self.old_state_dir = codex_guard.STATE_DIR
-        codex_guard.STATE_DIR = self.state
+        codex_guard.STATE_DIR = self.state_dir
         self.root = self.tmp / "repo"
         self.root.mkdir()
         (self.root / "AGENTS.md").write_text("# agents\n", encoding="utf-8")
         (self.root / "SCHEMA.md").write_text("# schema\n", encoding="utf-8")
-        (self.root / "wiki").mkdir()
+        (self.root / "wiki" / "contracts").mkdir(parents=True)
+        (self.root / "wiki" / "reviews").mkdir()
         (self.root / "wiki" / "index.md").write_text("# index\n", encoding="utf-8")
-        (self.root / "wiki" / "log.md").write_text("# log\n", encoding="utf-8")
         shutil.copy(ROOT / "harness_policy.yaml", self.root / "harness_policy.yaml")
-        self.data = {"cwd": str(self.root), "session_id": "test-session", "turn_id": "1"}
+        self.data = {"cwd": str(self.root), "session_id": "session-a", "turn_id": "turn-1"}
 
     def tearDown(self) -> None:
         codex_guard.STATE_DIR = self.old_state_dir
         shutil.rmtree(self.tmp)
 
-    def seed_gan(self) -> None:
-        with codex_guard.locked_gan_state(self.data) as (_, state):
-            state["project_root"] = str(self.root)
-            state["last_snapshot"] = codex_guard.build_snapshot(self.root, codex_guard.should_track_gan_path)
-            state["contract_snapshot"] = codex_guard.artifact_snapshot(self.root, "wiki/contracts/*.md")
-            state["review_snapshot"] = codex_guard.artifact_snapshot(self.root, "wiki/reviews/*-review.md")
+    def capture(self, function, data: dict | None = None) -> str:
+        output = io.StringIO()
+        with redirect_stdout(output):
+            function(data or self.data)
+        return output.getvalue()
 
-    def read_gan(self) -> dict:
-        _, state = codex_guard.gan_state(self.data)
-        return state
+    def begin(self, prompt: str = "Implement an ordinary feature") -> str:
+        payload = dict(self.data, prompt=prompt)
+        return self.capture(codex_guard.hook_user_prompt, payload)
 
-    def seed_wiki(self) -> None:
-        with codex_guard.locked_wiki_state(self.data) as (_, state):
-            state["schema_root"] = str(self.root)
-            state["last_snapshot"] = codex_guard.build_snapshot(self.root, codex_guard.should_track_wiki_path)
+    def state(self) -> dict:
+        return codex_guard.load_state(codex_guard.governed_state_path(self.data))
 
-    def seed_strict_change(self, *, validation: bool = False) -> None:
-        with codex_guard.locked_gan_state(self.data) as (_, state):
-            state["project_root"] = str(self.root)
-            state["triggered"] = True
-            state["contract_required"] = True
-            state["review_required"] = True
-            state["risky_change"] = True
-            state["risk_flags"] = ["risky_path:hooks/**"]
-            state["validation_seen"] = validation
-            state["contract_snapshot"] = {}
-            state["review_snapshot"] = {}
-
-    def test_150_lines_require_contract_but_not_review(self) -> None:
-        self.seed_gan()
-        (self.root / "feature.py").write_text("\n".join(f"line_{i} = {i}" for i in range(160)), encoding="utf-8")
-        patch = "*** Begin Patch\n*** Add File: feature.py\n+content\n*** End Patch"
-        codex_guard.track_gan_changes(self.data, [("apply_patch", {"command": patch})], self.root)
-        state = self.read_gan()
-        self.assertTrue(state["contract_required"])
-        self.assertFalse(state["review_required"])
-        self.assertTrue(state["triggered"])
-        self.assertGreaterEqual(state["total_net_lines"], 150)
-
-    def test_300_lines_require_review(self) -> None:
-        self.seed_gan()
-        (self.root / "feature.py").write_text("\n".join(f"line_{i} = {i}" for i in range(320)), encoding="utf-8")
-        patch = "*** Begin Patch\n*** Add File: feature.py\n+content\n*** End Patch"
-        codex_guard.track_gan_changes(self.data, [("apply_patch", {"command": patch})], self.root)
-        state = self.read_gan()
-        self.assertTrue(state["contract_required"])
-        self.assertTrue(state["review_required"])
-
-    def test_ordinary_new_file_does_not_trigger_review(self) -> None:
-        self.seed_gan()
-        (self.root / "small_module.py").write_text("\n".join(f"line_{i} = {i}" for i in range(100)), encoding="utf-8")
-        patch = "*** Begin Patch\n*** Add File: small_module.py\n+content\n*** End Patch"
-        codex_guard.track_gan_changes(self.data, [("apply_patch", {"command": patch})], self.root)
-        state = self.read_gan()
-        self.assertEqual(state["new_files"], ["small_module.py"])
-        self.assertFalse(state["contract_required"])
-        self.assertFalse(state["review_required"])
-        self.assertFalse(state["triggered"])
-
-    def test_architecture_signal_requires_contract_only(self) -> None:
-        self.seed_gan()
-        with codex_guard.locked_gan_state(self.data) as (_, state):
-            state["architecture_signal"] = True
-        (self.root / "feature.py").write_text("enabled = True\n", encoding="utf-8")
-        patch = "*** Begin Patch\n*** Add File: feature.py\n+enabled = True\n*** End Patch"
-        messages, _ = codex_guard.track_gan_changes(
-            self.data, [("apply_patch", {"command": patch})], self.root
+    def patch(self, *paths: str, tool_name: str = "functions.apply_patch") -> str:
+        declarations = "\n".join(f"*** Update File: {path}" for path in paths)
+        payload = dict(
+            self.data,
+            tool_name=tool_name,
+            tool_input={"command": f"*** Begin Patch\n{declarations}\n*** End Patch"},
         )
-        state = self.read_gan()
-        self.assertTrue(state["contract_required"])
-        self.assertFalse(state["review_required"])
-        self.assertEqual(len(messages), 1)
+        return self.capture(codex_guard.hook_post_tool, payload)
 
-    def test_security_signal_requires_contract_and_review(self) -> None:
-        self.seed_gan()
-        with codex_guard.locked_gan_state(self.data) as (_, state):
-            state["sensitive_review_signal"] = True
-        (self.root / "feature.py").write_text("enabled = True\n", encoding="utf-8")
-        patch = "*** Begin Patch\n*** Add File: feature.py\n+enabled = True\n*** End Patch"
-        codex_guard.track_gan_changes(self.data, [("apply_patch", {"command": patch})], self.root)
-        state = self.read_gan()
-        self.assertTrue(state["contract_required"])
-        self.assertTrue(state["review_required"])
-
-    def test_risky_path_sets_review_required_for_small_diff(self) -> None:
-        self.seed_gan()
-        (self.root / "hooks").mkdir()
-        (self.root / "hooks" / "guard.py").write_text("enabled = True\n", encoding="utf-8")
-        patch = "*** Begin Patch\n*** Add File: hooks/guard.py\n+enabled = True\n*** End Patch"
-        codex_guard.track_gan_changes(self.data, [("apply_patch", {"command": patch})], self.root)
-        state = self.read_gan()
-        self.assertTrue(state["contract_required"])
-        self.assertTrue(state["review_required"])
-        self.assertTrue(state["risky_change"])
-        self.assertTrue(any(flag.startswith("harness_self:") for flag in state["risk_flags"]))
-
-    def test_agents_and_schema_are_not_hard_risk(self) -> None:
-        policy = codex_guard.load_harness_policy(self.root)
-        self.assertEqual(codex_guard.risk_flags_for_paths(["AGENTS.md", "SCHEMA.md"], policy), [])
-
-    def test_ci_workflow_path_is_risky(self) -> None:
-        policy = codex_guard.load_harness_policy(self.root)
-        flags = codex_guard.risk_flags_for_paths([".github/workflows/ci.yml"], policy)
-        self.assertTrue(any(flag.startswith("risky_path:") for flag in flags))
-
-    def test_generated_cache_files_are_ignored(self) -> None:
-        self.assertFalse(codex_guard.should_track_gan_path(self.root, "cache/generated.py"))
-        self.assertFalse(codex_guard.should_track_gan_path(self.root, "tmp/generated.py"))
-        self.assertFalse(codex_guard.should_track_gan_path(self.root, "dist/generated.py"))
-
-    def test_unattributed_external_change_is_not_charged_to_bash(self) -> None:
-        self.seed_gan()
-        (self.root / "external.py").write_text("\n".join(f"line_{i} = {i}" for i in range(120)), encoding="utf-8")
-
-        codex_guard.track_gan_changes(self.data, [("Bash", {"command": "pwd"})], self.root)
-
-        state = self.read_gan()
-        self.assertEqual(state["total_net_lines"], 0)
-        self.assertEqual(state["touched_files"], [])
-        self.assertFalse(state["triggered"])
-
-    def test_official_apply_patch_command_attributes_only_declared_path(self) -> None:
-        self.seed_gan()
-        (self.root / "external.py").write_text("external = True\n", encoding="utf-8")
-        (self.root / "owned.py").write_text("owned = True\n", encoding="utf-8")
-        patch = """*** Begin Patch
-*** Add File: owned.py
-+owned = True
-*** End Patch"""
-
-        codex_guard.track_gan_changes(self.data, [("apply_patch", {"command": patch})], self.root)
-
-        state = self.read_gan()
-        self.assertEqual(state["touched_files"], ["owned.py"])
-        self.assertNotIn("external.py", state["touched_files"])
-
-    def test_unattributed_external_code_change_does_not_trigger_wiki_ingest(self) -> None:
-        self.seed_wiki()
-        (self.root / "external.py").write_text("external = True\n", encoding="utf-8")
-
-        codex_guard.track_wiki_edits(self.data, [("Bash", {"command": "pwd"})], self.root)
-
-        _, state = codex_guard.wiki_state(self.data)
-        self.assertEqual(state["code_files"], [])
-
-    def test_bash_patch_text_does_not_claim_session_root_collision(self) -> None:
-        self.seed_gan()
-        (self.root / "same_name.py").write_text(
-            "\n".join(f"line_{i} = {i}" for i in range(120)),
+    def create_current_artifacts(
+        self,
+        *,
+        contract: str = "wiki/contracts/test.md",
+        review_contract: str | None = None,
+        explicit_validation: bool = True,
+    ) -> tuple[Path, Path]:
+        contract_path = self.root / contract
+        contract_path.parent.mkdir(parents=True, exist_ok=True)
+        contract_path.write_text(CONTRACT_TEXT, encoding="utf-8")
+        review_path = self.root / "wiki/reviews/test-review.md"
+        review_path.write_text(
+            review_text(review_contract or contract, explicit_validation=explicit_validation),
             encoding="utf-8",
         )
-        command = """apply_patch <<'PATCH'
-*** Begin Patch
-*** Add File: same_name.py
-+sibling = True
-*** End Patch
-PATCH"""
+        return contract_path, review_path
 
-        codex_guard.track_gan_changes(self.data, [("Bash", {"command": command})], self.root)
+    def test_policy_has_no_size_or_command_gates(self) -> None:
+        policy = codex_guard.load_harness_policy(self.root)
+        self.assertEqual(policy["policy_version"], 3)
+        self.assertNotIn("thresholds", policy)
+        self.assertNotIn("validation_commands", policy)
+        self.assertEqual(policy["enforcement"]["missing_governed_artifacts"], "block")
 
-        state = self.read_gan()
-        self.assertFalse(state["triggered"])
-        self.assertEqual(state["touched_files"], [])
-        self.assertEqual(state["total_net_lines"], 0)
+    def test_governed_policy_patterns_cover_objective_risk_paths(self) -> None:
+        policy = codex_guard.load_harness_policy(self.root)
+        paths = [
+            "hooks/guard.py",
+            "auth/session.py",
+            "src/auth.py",
+            ".github/workflows/ci.yml",
+            "deploy/release.sh",
+            "src/permission_check.py",
+        ]
+        flags = codex_guard.governed_flags_for_paths(paths, policy)
+        self.assertEqual(len(flags), len(paths))
+        self.assertEqual(codex_guard.governed_flags_for_paths(["src/author.py"], policy), [])
 
-    def test_worktree_identity_distinguishes_sibling_worktrees(self) -> None:
-        subprocess.run(["git", "-C", str(self.root), "init", "-q"], check=True)
-        subprocess.run(["git", "-C", str(self.root), "config", "user.email", "test@example.com"], check=True)
-        subprocess.run(["git", "-C", str(self.root), "config", "user.name", "Test"], check=True)
-        subprocess.run(["git", "-C", str(self.root), "add", "."], check=True)
-        subprocess.run(["git", "-C", str(self.root), "commit", "-qm", "seed"], check=True)
-        sibling = self.tmp / "sibling-worktree"
-        subprocess.run(
-            ["git", "-C", str(self.root), "worktree", "add", "-q", "-b", "sibling", str(sibling)],
-            check=True,
+    def test_latin_prompt_terms_use_token_boundaries(self) -> None:
+        policy = codex_guard.load_harness_policy(self.root)
+        self.assertEqual(codex_guard.prompt_risk_reason("Implement author metadata", policy), "")
+        self.assertEqual(codex_guard.prompt_risk_reason("Implement auth metadata", policy), "auth")
+
+    def test_performance_sensitive_optimize_and_update_are_actionable(self) -> None:
+        policy = codex_guard.load_harness_policy(self.root)
+        prompts = [
+            "Optimize this performance-sensitive loop",
+            "优化这个性能敏感路径",
+            "Update this performance-sensitive loop",
+            "更新这个性能敏感路径",
+        ]
+        for prompt in prompts:
+            with self.subTest(prompt=prompt):
+                self.assertTrue(codex_guard.prompt_risk_reason(prompt, policy))
+
+    def test_post_tool_matcher_targets_only_structured_file_tools(self) -> None:
+        config = json.loads((ROOT / "hooks.json").read_text(encoding="utf-8"))
+        matcher = config["hooks"]["PostToolUse"][0]["matcher"]
+        self.assertIsNotNone(re.fullmatch(matcher, "functions.apply_patch"))
+        self.assertIsNotNone(re.fullmatch(matcher, "multi_tool_use.parallel"))
+        self.assertIsNone(re.fullmatch(matcher, "functions.exec_command"))
+        self.assertIsNone(re.fullmatch(matcher, "Bash"))
+
+    def test_ordinary_large_change_is_silent(self) -> None:
+        self.begin()
+        (self.root / "feature.py").write_text("value = 1\n" * 10_000, encoding="utf-8")
+        self.assertEqual(self.patch("feature.py"), "")
+        state = self.state()
+        self.assertEqual(state["changed_paths"], ["feature.py"])
+        self.assertFalse(state["governed"])
+        self.assertEqual(self.capture(codex_guard.hook_stop), "")
+
+    def test_no_path_tool_skips_state_lock(self) -> None:
+        payload = dict(self.data, tool_name="functions.exec_command", tool_input={"cmd": "git status"})
+        with mock.patch.object(
+            codex_guard, "locked_governed_state", side_effect=AssertionError("state lock used")
+        ):
+            self.assertEqual(self.capture(codex_guard.hook_post_tool, payload), "")
+
+    def test_bash_patch_text_is_not_file_evidence(self) -> None:
+        self.begin()
+        payload = dict(
+            self.data,
+            tool_name="Bash",
+            tool_input={"command": "apply_patch <<'PATCH'\n*** Update File: hooks/guard.py\nPATCH"},
         )
+        self.assertEqual(self.capture(codex_guard.hook_post_tool, payload), "")
+        self.assertEqual(self.state()["changed_paths"], [])
 
-        primary = codex_guard.worktree_identity(self.root)
-        secondary = codex_guard.worktree_identity(sibling)
+    def test_apply_patch_uses_only_declared_paths(self) -> None:
+        self.begin()
+        payload = dict(
+            self.data,
+            tool_name="apply_patch",
+            tool_input={
+                "command": "*** Begin Patch\n*** Update File: feature.py\n+ mentions hooks/guard.py\n*** End Patch"
+            },
+        )
+        self.capture(codex_guard.hook_post_tool, payload)
+        self.assertEqual(self.state()["changed_paths"], ["feature.py"])
+        self.assertFalse(self.state()["governed"])
 
-        self.assertNotEqual(primary["scope_key"], secondary["scope_key"])
-        self.assertEqual(primary["common_dir"], secondary["common_dir"])
-        self.assertNotEqual(primary["git_dir"], secondary["git_dir"])
+    def test_parallel_nested_apply_patch_is_attributed(self) -> None:
+        self.begin()
+        payload = dict(
+            self.data,
+            tool_name="multi_tool_use.parallel",
+            tool_input={
+                "tool_uses": [
+                    {
+                        "recipient_name": "functions.apply_patch",
+                        "parameters": {
+                            "command": "*** Begin Patch\n*** Update File: hooks/guard.py\n*** End Patch"
+                        },
+                    }
+                ]
+            },
+        )
+        output = self.capture(codex_guard.hook_post_tool, payload)
+        self.assertIn("governed change detected", output)
+        self.assertTrue(self.state()["governed"])
 
-    def test_session_id_keeps_explicit_sessions_separate(self) -> None:
-        first = dict(self.data, session_id="session-a")
-        second = dict(self.data, session_id="session-b")
-        self.assertNotEqual(codex_guard.session_id(first), codex_guard.session_id(second))
-        self.assertNotEqual(codex_guard.meta_path(first), codex_guard.meta_path(second))
+    def test_governed_path_triggers_one_nudge(self) -> None:
+        self.begin()
+        first = self.patch("hooks/guard.py")
+        second = self.patch("hooks/other.py")
+        self.assertIn("governed change detected", first)
+        self.assertEqual(second, "")
+        self.assertEqual(self.state()["governed_paths"], ["hooks/guard.py", "hooks/other.py"])
 
-    def test_wiki_bootstrap_is_once_per_session_and_hash(self) -> None:
-        first = codex_guard.wiki_bootstrap_message(self.data, self.root, self.root)
-        second = codex_guard.wiki_bootstrap_message(self.data, self.root, self.root)
-        self.assertIn("Wiki bootstrap", first or "")
-        self.assertIsNone(second)
+    def test_sensitive_implementation_prompt_plus_code_is_governed(self) -> None:
+        self.begin("请实现 security hardening")
+        self.patch("feature.py")
+        state = self.state()
+        self.assertTrue(state["governed"])
+        self.assertIn("prompt:security", state["risk_flags"])
 
-        index = self.root / "wiki" / "index.md"
-        index.write_text(index.read_text(encoding="utf-8") + "\nchanged\n", encoding="utf-8")
-        changed = codex_guard.wiki_bootstrap_message(self.data, self.root, self.root)
-        self.assertIn("wiki/index.md", changed or "")
+    def test_sensitive_discussion_is_not_governed(self) -> None:
+        self.begin("讨论 security architecture，不修改代码")
+        self.patch("feature.py")
+        self.assertFalse(self.state()["governed"])
 
-        other = self.tmp / "other-worktree"
+    def test_external_operation_without_file_write_is_not_governed(self) -> None:
+        self.begin("Implement the deploy operation")
+        payload = dict(self.data, tool_name="Bash", tool_input={"command": "deploy --dry-run"})
+        self.capture(codex_guard.hook_post_tool, payload)
+        self.assertFalse(self.state()["governed"])
+
+    def test_generated_paths_and_ordinary_guidance_are_not_governed(self) -> None:
+        self.begin()
+        self.patch(".pytest_cache/generated.py", "AGENTS.md", "SCHEMA.md")
+        state = self.state()
+        self.assertEqual(state["changed_paths"], ["AGENTS.md", "SCHEMA.md"])
+        self.assertFalse(state["governed"])
+
+    def test_session_and_turn_state_are_isolated(self) -> None:
+        self.begin()
+        first = codex_guard.governed_state_path(self.data)
+        other_session = dict(self.data, session_id="session-b")
+        other_turn = dict(self.data, turn_id="turn-2")
+        self.assertNotEqual(first, codex_guard.governed_state_path(other_session))
+        self.assertNotEqual(first, codex_guard.governed_state_path(other_turn))
+
+    def test_session_id_prefers_explicit_value(self) -> None:
+        with mock.patch.dict(os.environ, {"CODEX_SESSION_ID": "environment"}):
+            self.assertEqual(codex_guard.session_id({"session_id": "explicit"}), "explicit")
+
+    def test_bootstrap_is_deduplicated_and_policy_change_warns(self) -> None:
+        first = self.capture(codex_guard.hook_session_start)
+        second = self.capture(codex_guard.hook_session_start)
+        self.assertIn("Wiki bootstrap", first)
+        self.assertEqual(second, "")
+        policy_path = self.root / "harness_policy.yaml"
+        policy_path.write_text(policy_path.read_text() + "\n# changed\n", encoding="utf-8")
+        third = self.capture(codex_guard.hook_session_start)
+        self.assertIn("start a new Codex session", third)
+
+    def test_legacy_bootstrap_state_requests_a_new_session(self) -> None:
+        identity = codex_guard.worktree_identity(self.root)
+        codex_guard.save_state(
+            codex_guard.meta_path(self.data),
+            {"wiki_bootstrap": {"scope_key": identity["scope_key"]}},
+        )
+        output = self.capture(codex_guard.hook_session_start)
+        self.assertIn("Harness V3 replaced the active policy", output)
+
+    def test_non_git_worktree_identity_is_root_scoped(self) -> None:
+        other = self.tmp / "other"
         other.mkdir()
-        moved = codex_guard.wiki_bootstrap_message(self.data, self.root, other)
-        self.assertIn("Wiki bootstrap", moved or "")
+        first = codex_guard.worktree_identity(self.root)
+        same = codex_guard.worktree_identity(self.root)
+        different = codex_guard.worktree_identity(other)
+        self.assertTrue(codex_guard.same_worktree(first, same))
+        self.assertFalse(codex_guard.same_worktree(first, different))
 
-    def test_discussion_prompt_does_not_emit_gan_guidance(self) -> None:
-        codex_guard.wiki_bootstrap_message(self.data, self.root, self.root)
-        data = dict(self.data, prompt="讨论如何实现架构和 reviewer 规则")
-        stdout = io.StringIO()
-        with redirect_stdout(stdout):
-            codex_guard.hook_user_prompt(data)
-        self.assertEqual(stdout.getvalue(), "")
-        self.assertFalse(codex_guard.gan_state(data)[1]["triggered"])
+    def test_preexisting_artifacts_do_not_satisfy_current_turn(self) -> None:
+        (self.root / "wiki/contracts/test.md").write_text(CONTRACT_TEXT, encoding="utf-8")
+        (self.root / "wiki/reviews/test-review.md").write_text(review_text(), encoding="utf-8")
+        self.begin()
+        self.patch("hooks/guard.py")
+        touched = os.stat(self.root).st_mtime_ns + 1_000_000
+        os.utime(self.root / "wiki/contracts/test.md", ns=(touched, touched))
+        os.utime(self.root / "wiki/reviews/test-review.md", ns=(touched, touched))
+        evidence = codex_guard.evaluate_artifacts(self.root, self.state())
+        self.assertEqual(evidence["missing"], ["contract", "current_pass_review"])
 
-    def test_unknown_session_without_process_scope_fails_open_per_hook_process(self) -> None:
-        old_scope = codex_guard.codex_process_scope
-        saved_env = {key: os.environ.pop(key, None) for key in codex_guard.ENV_SESSION_ID_KEYS}
-        try:
-            codex_guard.codex_process_scope = lambda: None
-            session = codex_guard.session_id({"cwd": str(self.root)})
-        finally:
-            codex_guard.codex_process_scope = old_scope
-            for key, value in saved_env.items():
-                if value is not None:
-                    os.environ[key] = value
-        self.assertIn("unknown-cwd-", session)
-        self.assertIn(f"hookpid{os.getpid()}-", session)
+    def test_current_contract_and_fresh_bound_pass_review_satisfy_gate(self) -> None:
+        self.begin()
+        self.patch("hooks/guard.py")
+        self.create_current_artifacts()
+        evidence = codex_guard.evaluate_artifacts(self.root, self.state())
+        self.assertEqual(evidence["missing"], [])
+        self.assertEqual(self.capture(codex_guard.hook_stop), "")
 
-    def test_hook_process_scope_includes_process_start_time(self) -> None:
-        old_getpid = codex_guard.os.getpid
-        old_start = codex_guard.process_start_time
-        try:
-            codex_guard.os.getpid = lambda: 12345
-            codex_guard.process_start_time = lambda pid: "111"
-            first = codex_guard.hook_process_scope()
-            codex_guard.process_start_time = lambda pid: "222"
-            second = codex_guard.hook_process_scope()
-        finally:
-            codex_guard.os.getpid = old_getpid
-            codex_guard.process_start_time = old_start
-        self.assertEqual(first, "hookpid12345-111")
-        self.assertEqual(second, "hookpid12345-222")
-        self.assertNotEqual(first, second)
+    def test_review_must_bind_to_current_contract(self) -> None:
+        (self.root / "wiki/contracts/old.md").write_text(CONTRACT_TEXT, encoding="utf-8")
+        self.begin()
+        self.patch("hooks/guard.py")
+        self.create_current_artifacts(review_contract="wiki/contracts/old.md")
+        evidence = codex_guard.evaluate_artifacts(self.root, self.state())
+        self.assertEqual(evidence["missing"], ["current_pass_review"])
 
-    def test_codex_process_scope_ignores_terminal_only_scope(self) -> None:
-        old_getppid = codex_guard.os.getppid
-        saved_tmux = os.environ.get("TMUX")
-        try:
-            codex_guard.os.getppid = lambda: 1
-            os.environ["TMUX"] = "shared-terminal-scope"
-            self.assertIsNone(codex_guard.codex_process_scope())
-        finally:
-            codex_guard.os.getppid = old_getppid
-            if saved_tmux is None:
-                os.environ.pop("TMUX", None)
-            else:
-                os.environ["TMUX"] = saved_tmux
+    def test_review_must_have_explicit_validation_command_and_result(self) -> None:
+        self.begin()
+        self.patch("hooks/guard.py")
+        self.create_current_artifacts(explicit_validation=False)
+        evidence = codex_guard.evaluate_artifacts(self.root, self.state())
+        self.assertEqual(evidence["missing"], ["current_pass_review"])
 
-    def test_risky_change_missing_contract_blocks(self) -> None:
-        self.seed_strict_change()
-        with redirect_stderr(io.StringIO()):
-            rc = codex_guard.enforce_gan(self.data, self.root)
-        self.assertEqual(rc, 2)
-
-    def test_risky_change_missing_contract_blocks_repeated_stop(self) -> None:
-        self.seed_strict_change()
-        with redirect_stderr(io.StringIO()):
-            first = codex_guard.enforce_gan(self.data, self.root)
-            second = codex_guard.enforce_gan(self.data, self.root)
-        self.assertEqual(first, 2)
-        self.assertEqual(second, 2)
-
-    def test_risky_change_missing_review_blocks(self) -> None:
-        (self.root / "wiki" / "contracts").mkdir()
-        (self.root / "wiki" / "contracts" / "2026-07-01-test.md").write_text(CONTRACT_TEXT, encoding="utf-8")
-        self.seed_strict_change(validation=True)
-        with redirect_stderr(io.StringIO()):
-            rc = codex_guard.enforce_gan(self.data, self.root)
-        self.assertEqual(rc, 2)
-
-    def test_lean_review_artifact_is_accepted(self) -> None:
-        (self.root / "wiki" / "reviews").mkdir()
-        review = self.root / "wiki" / "reviews" / "2026-07-12-lean-review.md"
-        review.write_text(REVIEW_LEAN_PASS_TEXT, encoding="utf-8")
-        status = codex_guard.review_artifact_status(self.root, {})
-        self.assertEqual(status["passing"], ["wiki/reviews/2026-07-12-lean-review.md"])
-
-    def test_pass_review_and_validation_allows_risky_change(self) -> None:
-        (self.root / "wiki" / "contracts").mkdir()
-        (self.root / "wiki" / "reviews").mkdir()
-        (self.root / "wiki" / "contracts" / "2026-07-01-test.md").write_text(CONTRACT_TEXT, encoding="utf-8")
-        (self.root / "wiki" / "reviews" / "2026-07-01-test-review.md").write_text(
-            REVIEW_PASS_TEXT,
-            encoding="utf-8",
+    def test_validation_rejects_pass_with_nonzero_exit(self) -> None:
+        sections = codex_guard.markdown_sections(
+            "## Validation evidence\n- Command: `python3 -m unittest`\n- Result: PASS (exit 1)\n"
         )
-        self.seed_strict_change(validation=True)
-        rc = codex_guard.enforce_gan(self.data, self.root)
-        self.assertEqual(rc, 0)
+        self.assertFalse(codex_guard.validation_is_explicit(sections))
 
-    def test_existing_valid_contract_reused_across_turns(self) -> None:
-        (self.root / "wiki" / "contracts").mkdir()
-        (self.root / "wiki" / "reviews").mkdir()
-        contract = self.root / "wiki" / "contracts" / "2026-07-01-test.md"
-        review = self.root / "wiki" / "reviews" / "2026-07-01-test-review.md"
-        contract.write_text(CONTRACT_TEXT, encoding="utf-8")
-        review.write_text(REVIEW_PASS_TEXT, encoding="utf-8")
-        contract_baseline = codex_guard.artifact_snapshot(self.root, "wiki/contracts/*.md")
-        self.seed_strict_change(validation=True)
-        with codex_guard.locked_gan_state(self.data) as (_, state):
-            state["contract_snapshot"] = contract_baseline
-        rc = codex_guard.enforce_gan(self.data, self.root)
-        self.assertEqual(rc, 0)
+    def test_review_becomes_stale_after_later_code_edit(self) -> None:
+        self.begin()
+        self.patch("hooks/guard.py")
+        self.create_current_artifacts()
+        self.patch("hooks/guard.py")
+        review_path = self.root / "wiki/reviews/test-review.md"
+        review_path.write_text(review_path.read_text(encoding="utf-8"), encoding="utf-8")
+        evidence = codex_guard.evaluate_artifacts(self.root, self.state())
+        self.assertEqual(evidence["missing"], ["current_pass_review"])
 
-    def test_ordinary_large_change_stop_is_silent(self) -> None:
-        with codex_guard.locked_gan_state(self.data) as (_, state):
-            state["project_root"] = str(self.root)
-            state["triggered"] = True
-            state["contract_required"] = True
-            state["review_required"] = True
-            state["large_change"] = True
-            state["total_net_lines"] = 320
-            state["contract_snapshot"] = {}
-            state["review_snapshot"] = {}
-        stdout = io.StringIO()
-        with redirect_stdout(stdout):
-            rc = codex_guard.enforce_gan(self.data, self.root)
-        self.assertEqual(rc, 0)
-        self.assertEqual(stdout.getvalue(), "")
-
-    def test_wiki_ingest_missing_is_silent_by_default(self) -> None:
-        with codex_guard.locked_wiki_state(self.data) as (_, state):
-            state["schema_root"] = str(self.root)
-            state["code_files"] = ["feature.py"]
-        stdout = io.StringIO()
-        with redirect_stdout(stdout):
-            rc = codex_guard.enforce_wiki(self.data, self.root)
-        self.assertEqual(rc, 0)
-        self.assertEqual(stdout.getvalue(), "")
-
-    def test_hook_stop_is_silent_for_wiki_reminder(self) -> None:
-        with codex_guard.locked_wiki_state(self.data) as (_, state):
-            state["schema_root"] = str(self.root)
-            state["code_files"] = ["feature.py"]
-
-        stdout = io.StringIO()
-        with redirect_stdout(stdout), redirect_stderr(io.StringIO()):
-            rc = codex_guard.hook_stop(self.data)
-
-        self.assertEqual(rc, 0)
-        self.assertEqual(stdout.getvalue(), "")
-
-    def test_hook_stop_block_outputs_decision_block_json(self) -> None:
-        self.seed_strict_change()
-
-        stdout = io.StringIO()
-        stderr = io.StringIO()
-        with redirect_stdout(stdout), redirect_stderr(stderr):
-            rc = codex_guard.hook_stop(self.data)
-
-        self.assertEqual(rc, 0)
-        self.assertEqual(stderr.getvalue(), "")
-        payload = json.loads(stdout.getvalue())
+    def test_ordinary_stop_is_silent_and_governed_stop_blocks(self) -> None:
+        self.begin()
+        self.patch("feature.py")
+        self.assertEqual(self.capture(codex_guard.hook_stop), "")
+        self.patch("hooks/guard.py")
+        output = self.capture(codex_guard.hook_stop)
+        payload = json.loads(output)
         self.assertEqual(payload["decision"], "block")
-        self.assertIn("missing: contract", payload["reason"].lower())
+        self.assertIn("contract", payload["reason"])
+        self.assertIn("current_pass_review", payload["reason"])
 
-    def test_hook_stop_active_prevents_recursive_block_loop(self) -> None:
-        active_data = dict(self.data, stop_hook_active=True)
-        with codex_guard.locked_gan_state(active_data) as (_, state):
-            state["project_root"] = str(self.root)
-            state["triggered"] = True
-            state["contract_required"] = True
-            state["review_required"] = True
-            state["risky_change"] = True
-            state["risk_flags"] = ["risky_path:hooks/**"]
-            state["contract_snapshot"] = {}
-            state["review_snapshot"] = {}
+    def test_stop_loop_guard_is_silent(self) -> None:
+        self.begin()
+        self.patch("hooks/guard.py")
+        output = self.capture(codex_guard.hook_stop, dict(self.data, stop_hook_active=True))
+        self.assertEqual(output, "")
 
-        stdout = io.StringIO()
-        with redirect_stdout(stdout), redirect_stderr(io.StringIO()):
-            rc = codex_guard.hook_stop(active_data)
+    def test_worktree_mismatch_fails_open(self) -> None:
+        self.begin()
+        self.patch("hooks/guard.py")
+        with codex_guard.locked_governed_state(self.data) as (_, state):
+            state["worktree"] = {"scope_key": "different", "root": "/elsewhere"}
+        self.assertEqual(self.capture(codex_guard.hook_stop), "")
 
-        self.assertEqual(rc, 0)
-        self.assertEqual(stdout.getvalue(), "")
-        state = codex_guard.gan_state(active_data)[1]
-        self.assertEqual(state["stop_blocks"], 0)
-
-    def test_stop_block_names_checked_worktree_scope(self) -> None:
-        self.seed_strict_change()
-        with codex_guard.locked_gan_state(self.data) as (_, state):
-            state["worktree"] = codex_guard.worktree_identity(self.root)
-
-        stdout = io.StringIO()
-        with redirect_stdout(stdout), redirect_stderr(io.StringIO()):
-            codex_guard.hook_stop(self.data)
-
-        payload = json.loads(stdout.getvalue())
-        self.assertIn(f"Worktree: {self.root}", payload["reason"])
-
-    def test_stop_fails_open_when_turn_worktree_identity_mismatches_cwd(self) -> None:
-        sibling = self.tmp / "other-repo"
-        sibling.mkdir()
-        (sibling / "AGENTS.md").write_text("# other\n", encoding="utf-8")
-        with codex_guard.locked_gan_state(self.data) as (_, state):
-            state["project_root"] = str(self.root)
-            state["worktree"] = codex_guard.worktree_identity(sibling)
-            state["triggered"] = True
-            state["contract_required"] = True
-            state["review_required"] = True
-            state["risky_change"] = True
-            state["contract_snapshot"] = {}
-            state["review_snapshot"] = {}
-
-        stdout = io.StringIO()
-        with redirect_stdout(stdout), redirect_stderr(io.StringIO()):
-            rc = codex_guard.hook_stop(self.data)
-
-        self.assertEqual(rc, 0)
-        self.assertEqual(stdout.getvalue(), "")
-
-    def test_hook_stop_is_silent_for_advisory_gates(self) -> None:
-        with codex_guard.locked_wiki_state(self.data) as (_, state):
-            state["schema_root"] = str(self.root)
-            state["code_files"] = ["feature.py"]
-        with codex_guard.locked_gan_state(self.data) as (_, state):
-            state["project_root"] = str(self.root)
-            state["triggered"] = True
-            state["contract_required"] = True
-            state["review_required"] = True
-            state["total_net_lines"] = 320
-            state["contract_snapshot"] = {}
-            state["review_snapshot"] = {}
-
-        stdout = io.StringIO()
-        with redirect_stdout(stdout), redirect_stderr(io.StringIO()):
-            rc = codex_guard.hook_stop(self.data)
-
-        self.assertEqual(rc, 0)
-        self.assertEqual(stdout.getvalue(), "")
+    def test_legacy_snapshot_and_validation_trackers_are_removed(self) -> None:
+        self.assertFalse(hasattr(codex_guard, "build_snapshot"))
+        self.assertFalse(hasattr(codex_guard, "record_validation"))
+        self.assertFalse(hasattr(codex_guard, "compile_changed_python"))
 
 
 if __name__ == "__main__":

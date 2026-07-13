@@ -1,7 +1,7 @@
 ---
 title: Harness Policy
 type: codex-config
-updated: 2026-07-12 22:59
+updated: 2026-07-13 13:29
 sources:
   - harness_policy.yaml
   - hooks/codex_guard.py
@@ -9,48 +9,43 @@ sources:
 
 # Harness Policy
 
-`harness_policy.yaml` controls the Codex Loop Harness without editing Python for routine policy changes.
+`harness_policy.yaml` defines the small policy surface of Harness V3. It no longer contains line-count thresholds, new-file counters, validation command markers, incremental review reminders, or separate harness-self gates.
 
-## Thresholds
+## Policy Version
 
-- `contract_net_new_lines: 150`: ordinary code changes at or above this size need a short contract.
-- `review_net_new_lines: 300`: ordinary code changes at or above this size need a reviewer.
-- `incremental_reminder_lines: 300`: after review, another 300 attributed lines can request a checkpoint re-review.
-- `new_file_min_lines: 80`: only controls which new files enter incremental telemetry; a new file does not trigger review by itself.
-- `incremental_new_files: 5`: five qualifying files since review can request a checkpoint re-review.
-- `large_change_lines: 300`: classifies the size tier used by telemetry.
-- `large_change_new_files: 999`: effectively disables ordinary new-file-count classification as a standalone gate.
+`policy_version: 3` is included in the per-session bootstrap fingerprint. If `AGENTS.md`, the policy file, or its version changes during a session, the bootstrap hook asks the agent to start a new session so stale process instructions do not remain active.
 
-## Enforcement Modes
+## Enforcement
 
-Supported policy modes are:
+The default is `observe`. The only configured hard gate is:
 
-- `observe`
-- `remind`
-- `block`
+- `missing_governed_artifacts: block`
 
-The default and medium tiers are `observe`. Contract/review size thresholds create one short `PostToolUse` nudge; ordinary large changes remain advisory and Stop is silent. Risky or harness-self changes use `block`, and only objective missing contract, PASS review, or validation evidence becomes a Stop blocker. A changed review with `FAIL` or `NEEDS_HUMAN` also blocks strict changes.
+A block is considered only after the turn has concrete governed file evidence. Ordinary work stays silent regardless of size.
 
-Missing wiki ingest is `observe`, so it records state without user-facing Stop output.
+## Governed Paths
 
-## Risky Paths
-
-Hard-risk patterns include:
+Governed path patterns cover changes where missing review evidence has an objective risk:
 
 - `hooks/**`, `hooks.json`, `harness_policy.yaml`, `.codex/**`
 - auth, migration, deploy, CI workflow, sandbox, and permission-related paths
 
-Harness self-modification is the narrower `hooks/**`, `hooks.json`, and `harness_policy.yaml` set. `AGENTS.md`, `SCHEMA.md`, ordinary documentation, and general configuration are not hard-risk by path alone.
+Authentication file names are also classified by exact path tokens (`auth`, `authentication`, `authorization`, `oauth`, `oidc`, `sso`). Token matching covers paths such as `src/auth.py` without treating unrelated names such as `author.py` as authentication code.
 
-Risk, architecture, and security/performance prompt signals only matter after concrete code telemetry exists. Planning or discussion alone cannot activate a gate.
+`AGENTS.md`, `SCHEMA.md`, documentation, and general configuration are not governed by path alone.
+
+## Prompt Risk Terms
+
+Security, auth/OAuth, permission, sandbox, migration, deploy, CI, performance-sensitive, and harness-enforcement terms can classify a turn as governed only when both conditions hold:
+
+1. the prompt contains a positive implementation action rather than discussion or an explicitly negated action;
+2. a structured file tool later declares a review-relevant code or configuration path.
+
+Prompt text alone, Bash commands, and external operations therefore do not activate the code-review gate.
 
 ## Generated Paths
 
-Generated/cache paths such as `.git/**`, cache/tmp directories, build/dist outputs, virtualenvs, bytecode caches, node modules, data, probes, and scratch are ignored by diff telemetry.
-
-## Validation Markers
-
-Validation evidence is detected from shell commands containing markers such as `py_compile`, `unittest`, `pytest`, `ruff`, `mypy`, `tsc`, `npm test`, `bun test`, `cargo test`, or `go test`.
+Generated/runtime paths such as Git metadata, caches, tmp, build/dist, virtualenvs, bytecode, node modules, data, probes, logs, and app-server control files are excluded from path evidence.
 
 ## See Also
 

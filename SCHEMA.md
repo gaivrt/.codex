@@ -33,9 +33,9 @@ wiki/
 ├── log.md                # 操作日志（必须，append-only）
 ├── overview.md           # 项目全景
 ├── config/               # Codex 配置、MCP、approved rules
-├── hooks/                # lifecycle hooks、guard 阈值、状态文件行为
-├── contracts/            # non-trivial task contracts
-├── reviews/              # structured reviewer artifacts
+├── hooks/                # lifecycle hooks、governed gate、状态文件行为
+├── contracts/            # governed task contracts
+├── reviews/              # governed reviewer artifacts
 ├── skills/               # 已安装 skills 的目的、入口和资源
 ├── templates/            # 可复用模板说明
 ├── ops/                  # 运行态文件说明、排除规则、维护流程
@@ -48,8 +48,8 @@ wiki/
 
 - **project-overview** — 当前 Codex home 的全局地图、边界和维护原则
 - **codex-config** — `config.toml`、`hooks.json`、`rules/default.rules` 等配置页
-- **lifecycle-hook** — hook event、threshold、状态文件、fail-open/fail-hard 逻辑
-- **contract** — non-trivial task 的 scope、non-goals、acceptance criteria、validation、risk、review checklist
+- **lifecycle-hook** — hook event、governed path、状态文件、fail-open/fail-hard 逻辑
+- **contract** — governed task 的 scope、non-goals、acceptance criteria、validation、risk、review checklist
 - **review** — reviewer artifact，包含 Verdict、contract coverage、diff risk、validation evidence、issues、wiki ingest check
 - **skill-package** — skill 的目的、触发条件、入口文件、脚本和引用资源
 - **template-note** — 模板用途、输入输出边界和复用方式
@@ -80,12 +80,12 @@ wiki/
 
 ## Contract And Review Workflow
 
-1. Ordinary changes below 150 net-new lines need no contract. Architecture, risky, or `>=150` line work creates a short `wiki/contracts/<YYYY-MM-DD>-<task-slug>.md` before implementation.
+1. Ordinary changes need no contract or reviewer regardless of size. Governed implementation creates a short `wiki/contracts/<YYYY-MM-DD>-<task-slug>.md` before implementation.
 2. Contract pages contain only Original request, Scope, Non-goals, Acceptance criteria, Required validation, Risk class, and Reviewer checklist.
-3. Risky, security, performance-sensitive, or `>=300` line changes use a reviewer and a concise `wiki/reviews/<YYYY-MM-DD>-<task-slug>-review.md`.
-4. Review pages link the contract and contain only Verdict, contract coverage, concrete validation evidence, blocking issues, residual risk, required fixes, and wiki check.
-5. Valid verdicts are `PASS`, `FAIL`, and `NEEDS_HUMAN`. Only risky changes hard-block on missing objective contract, validation, or PASS review evidence.
-6. Ordinary new files do not trigger review by themselves. Planning and discussion never trigger gates without concrete code telemetry.
+3. Governed implementation uses one reviewer after a coherent checkpoint and records a concise `wiki/reviews/<YYYY-MM-DD>-<task-slug>-review.md`; incremental fragments are not separately reviewed.
+4. Review pages link the contract and contain only Contract, Verdict, concrete validation evidence, blocking issues, residual risk, required fixes, and wiki check.
+5. Valid verdicts are `PASS`, `FAIL`, and `NEEDS_HUMAN`. Only governed changes hard-block on a missing current contract or current PASS review with explicit validation evidence.
+6. Planning, discussion, line count, and ordinary new files never trigger gates without governed code/config telemetry. External-operation authorization and receipts remain separate from code review artifacts.
 
 ## Ingest Workflow
 

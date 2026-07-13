@@ -27,13 +27,13 @@
     ],
     "PostToolUse": [
       {
-        "matcher": ".*",
+        "matcher": ".*([Aa]pply_[Pp]atch|Write|Edit|MultiEdit|parallel|edit\\|write)$",
         "hooks": [
           {
             "type": "command",
             "command": "python3 /home/gaivr/.codex/hooks/codex_guard.py PostToolUse",
             "timeout": 10,
-            "statusMessage": "Tracking harness edits"
+            "statusMessage": "Checking governed file edits"
           }
         ]
       }

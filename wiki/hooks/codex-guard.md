@@ -1,7 +1,7 @@
 ---
 title: Codex Loop Harness
 type: lifecycle-hook
-updated: 2026-07-12 22:59
+updated: 2026-07-13 13:29
 sources:
   - hooks.json
   - hooks/codex_guard.py
@@ -9,47 +9,60 @@ sources:
   - tests/test_codex_guard.py
   - AGENTS.md
   - SCHEMA.md
-  - https://learn.chatgpt.com/docs/hooks
+  - https://developers.openai.com/codex/hooks
 ---
 
 # Codex Loop Harness
 
-`hooks/codex_guard.py` is the lifecycle dispatcher for a lean Codex Loop Harness. Its ordinary path is silent; process expands only after structured file-tool telemetry proves a sufficiently large or risky code change.
+`hooks/codex_guard.py` implements Harness V3: an ordinary silent path and a small risk-only governed path. It does not use task size, line count, or ordinary new files as process signals.
 
-The loop target is:
+The workflow is:
 
-`Bootstrap -> Contract -> Work -> Verify -> Review -> Ingest -> Trace -> Restart`
+`Bootstrap -> Ordinary Work`
+
+or, only when governed evidence appears:
+
+`Bootstrap -> Contract -> Work -> Targeted Validation -> Review -> Stop`
 
 ## Lifecycle Events
 
-- `UserPromptSubmit`: starts turn state, records worktree/code/artifact baselines, and stores architecture or sensitive-review prompt signals without treating discussion as evidence of work.
-- `SessionStart`: checks the same session/worktree bootstrap state without repeating unchanged guidance.
-- `PostToolUse`: attributes concrete structured file-tool effects, records diff/risk/reviewer/validation/wiki state, and emits at most one short nudge per contract or review threshold.
-- `Stop`: stays silent for ordinary advisory and missing-wiki states. Only strict risky/security/performance changes can emit a hard-block JSON object for objective missing artifacts.
+- `UserPromptSubmit` starts isolated turn state and fingerprints the artifact directories. It also records sensitive implementation intent without treating prompt text as proof of a change.
+- `SessionStart` performs the same hash-based bootstrap check without starting change state.
+- `PostToolUse` is matched only for ApplyPatch/Write/Edit/MultiEdit/parallel tools, then looks for structured file paths. Calls without paths return before opening the governed state lock. Ordinary declared paths are recorded silently; governed evidence emits one short nudge.
+- `Stop` returns silently for ordinary turns. A governed turn passes or emits one valid `{"decision":"block","reason":"..."}` object.
 
-Unexpected hook errors remain fail-open and are appended to `/tmp/codex-hook-errors.log`.
+Unexpected hook errors append non-sensitive diagnostics to `/tmp/codex-hook-errors.log` and fail open.
 
-## Policy-Driven Gates
+## Bootstrap
 
-`harness_policy.yaml` externalizes thresholds, enforcement modes, risky paths, generated paths, and validation command markers. The Python hook keeps safe defaults, but project policy is read from the project root when available.
+Session meta stores the worktree scope plus hashes of `SCHEMA.md`, `wiki/index.md`, `AGENTS.md`, and `harness_policy.yaml`, including `policy_version`. The first event asks the agent to read the schema and index. Schema/index changes name only the file that must be reread. Guidance or policy changes ask for a new Codex session because an existing session may retain old instructions. Legacy V2 `wiki_bootstrap` state is recognized as a migration signal and receives the same restart guidance.
 
-The policy supports three enforcement modes:
+## Path Evidence
 
-- `observe`: write trace only.
-- `remind`: emit a short tool-time nudge and return success.
-- `block`: make the public Stop hook emit one `decision: block` JSON object while the command itself returns success.
+The hook accepts only paths declared by structured file tools:
 
-Ordinary changes below 150 attributed net-new lines need neither contract nor reviewer. At 150 lines the harness requests a short contract; at 300 it requests review. These size-only tiers never hard-block at Stop. Risky path or security/performance changes require contract, validation, and a current PASS review; only their objective omissions hard-block.
+- ApplyPatch parses `Add File`, `Update File`, and `Delete File` declarations from structured tool input.
+- Write/Edit/MultiEdit use an explicit `file_path` or `path`.
+- Nested calls in a parallel tool are inspected individually.
 
-## Wiki Bootstrap
+Bash/exec command strings are not parsed, even if they contain patch-looking text. This intentionally favors missed telemetry over attributing another process's writes to the current turn. There is no `git ls-files`, filesystem walk, repository snapshot, line accounting, or automatic compile/typecheck pass.
 
-The session meta state stores the worktree `scope_key` and SHA-1 hashes of `SCHEMA.md` and `wiki/index.md`. The first `UserPromptSubmit` or `SessionStart` in a session/worktree emits one short bootstrap message. Later events are silent unless the worktree changes or either file hash changes, in which case only the changed source is named for rereading.
+Generated/runtime paths configured by policy are discarded before state is opened.
 
-Prompt classification initializes architecture/security/performance intent, but `triggered` is derived only after real attributed code paths exist. Planning and discussion therefore do not generate GAN guidance or Stop gates.
+## Governed Classification
 
-## Contract Gate
+A turn becomes governed through either:
 
-Architecture, risky, or at least 150-line attributed code changes create `wiki/contracts/<YYYY-MM-DD>-<task-slug>.md`. A valid short contract includes:
+- a declared path matching hook enforcement/policy, auth, migration, deploy, CI, sandbox, or permission patterns/tokens; or
+- a positive sensitive implementation prompt paired with a later review-relevant code/config write.
+
+Discussion and explicitly negated actions such as “不修改代码” do not count. Prompt intent without a structured write, and external operations without file evidence, stay outside the code-review gate. Ordinary `AGENTS.md`, `SCHEMA.md`, docs, and general config paths are not governed by path alone.
+
+The first governed event writes a `GovernedChange` trace and emits one PostToolUse nudge. Later edits are silent but update the last review-relevant edit timestamp.
+
+## Current Artifact Gate
+
+A governed contract must be created or changed after the turn baseline and contain:
 
 - Original request
 - Scope
@@ -59,99 +72,44 @@ Architecture, risky, or at least 150-line attributed code changes create `wiki/c
 - Risk class
 - Reviewer checklist
 
-An existing valid contract can be reused across turns and resumes. Size-only absence is advisory; strict risky absence blocks.
+A governed review must also be created or changed after baseline and contain Contract, Verdict, Validation evidence, Blocking issues, Residual risk, Required fixes before merge, and Wiki check.
 
-## Review Artifact Gate
+The review passes only when it links the exact current contract, uses `Verdict: PASS`, and records an explicit `Command:` plus a successful `Result:` with no failure/non-zero exit marker. After every governed code/config edit, the hook snapshots review content hashes; the passing review content must differ from that snapshot. Artifact baselines and freshness compare content hashes rather than mtime, so `touch` and same-content rewrites cannot make pre-existing or stale evidence current.
 
-Risky, security/performance-sensitive, or at least 300-line attributed changes require `wiki/reviews/<YYYY-MM-DD>-<task-slug>-review.md`. The lean shape contains Contract, Verdict, Validation evidence, Blocking issues, Residual risk, Required fixes before merge, and Wiki check; the previous structured shape remains accepted for compatibility.
+The hook does not infer validation from shell history. The review owns the choice and exact record of risk-proportionate validation.
 
-Review evidence must be created or changed after the turn baseline, and `Verdict` must be `PASS`. Size-only absence remains advisory at Stop; strict changes block on a missing/non-PASS current artifact.
+## Stop Behavior
 
-## Diff Telemetry And Risk
+Ordinary Stop is completely silent. Governed Stop evaluates only the current contract and review evidence:
 
-The harness builds repository snapshots from `git ls-files --cached --others --exclude-standard`, falling back to a filesystem walk, but a snapshot delta is charged to the turn only for paths evidenced by the current tool's structured input. Canonical `apply_patch` reads Add/Update/Delete paths from `tool_input.command`; Write/Edit-style tools use their explicit `file_path` or `path`. After every `PostToolUse`, the full baseline is refreshed even when there is no path evidence, so unrelated changes observed during a fail-open call do not leak into a later attributed call.
+- satisfied evidence returns silently and records a PASS trace;
+- missing evidence blocks with one JSON object while the hook process exits successfully;
+- `missing_governed_artifacts: observe` makes the same condition fail open;
+- worktree mismatch fails open and records both scopes;
+- `stop_hook_active=true` is a continuation loop guard and skips enforcement.
 
-The official release wire format makes common `cwd` the session cwd. Bash and canonical `apply_patch` expose `tool_input.command`; Bash does not expose a separate effective tool `workdir`. The harness therefore never parses Bash command text as file-ownership evidence, even when it contains patch-looking text. A Bash call with no structured path evidence contributes an empty scoped delta while still refreshing the baseline. This intentionally prefers missed telemetry over charging another terminal's changes to the current session.
+There is no Stop wiki-ingest gate, size reminder, validation-command gate, or incremental-review gate.
 
-Process tiers are triggered by attributed code telemetry:
+## State And Isolation
 
-- contract threshold: 150 net-new lines or an architecture/risky/sensitive signal paired with a code change;
-- review threshold: 300 net-new lines, a risky path, or a security/performance-sensitive signal paired with a code change;
-- risky path: hook enforcement/policy plus auth, migration, deploy, CI, sandbox, and permission patterns;
-- harness self-modification: `hooks/**`, `hooks.json`, or `harness_policy.yaml`.
+State lives under `~/.codex/tmp/hooks/` and is keyed by session plus turn. Identity prefers explicit session/thread ids, configured environment ids, transcript UUIDs, and parent ids. A verified Codex parent process may extend fallback scope; broad terminal variables are deliberately not session identity.
 
-Ordinary new files are counted toward their net-new lines but never trigger review merely because they are new. `AGENTS.md`, `SCHEMA.md`, docs, and general config are excluded from hard-risk classification by path alone.
+Worktree identity combines resolved root and Git dir. Sibling worktrees therefore have different scope keys even when they share a common Git dir. Stop fails open if its stored scope differs from the event cwd.
 
-Generated/cache paths are excluded by policy.
+Trace remains under `~/.codex/tmp/hooks/<session_id>/trace.jsonl` and contains only governed activation/Stop outcomes. `wiki/log.md` remains concise durable history.
 
-## Validation Evidence
+## Known Boundary
 
-The hook records validation evidence when shell commands include configured markers such as `py_compile`, `unittest`, `pytest`, `ruff`, `mypy`, `tsc`, `npm test`, `bun test`, `cargo test`, or `go test`.
-
-Validation is a hard requirement only for strict risky/security/performance changes. Ordinary size-only changes can receive tool-time process nudges but Stop stays silent.
-
-The hook also automatically compiles changed Python files and attempts TypeScript checking when TypeScript files changed.
-
-## Trace And Restart
-
-Per-session trace lives under:
-
-`~/.codex/tmp/hooks/<session_id>/trace.jsonl`
-
-Per-session restart state lives under:
-
-`~/.codex/tmp/hooks/<session_id>/state.json`
-
-Trace records include prompt classification, bootstrap decisions, changed files, line deltas, risk flags, validation messages, gate decisions, missing requirements, worktree identity, and Stop outcomes.
-
-`wiki/log.md` remains durable project history and does not receive noisy per-session trace.
-
-## Stop JSON Output
-
-`Stop` is stricter than prompt/session/tool hooks: when it exits `0` and writes to stdout, stdout must be one valid JSON object. The harness therefore aggregates Wiki and GAN gate messages and emits a single Stop object.
-
-If a policy explicitly enables a reminder, reminder-only Stop output uses:
-
-`{"systemMessage": "..."}`
-
-Strict hard-block Stop output uses:
-
-`{"decision": "block", "reason": "..."}`
-
-For `Stop`, `decision: "block"` tells Codex to continue with the reason as the next prompt. The hook process still exits `0`; direct internal gate functions may return `2` to their caller. The harness does not emit `hookSpecificOutput.additionalContext` for `Stop`, because that shape is invalid for this event.
-
-## Session Isolation
-
-Hook state keys are scoped by `session_id` plus the active turn id. The session identity resolver prefers explicit hook/session/thread ids, configured Codex session environment ids, transcript/session path UUIDs, and parent message ids.
-
-When those are missing, the harness may append a Codex parent process scope (`pid<id>-<start_time>`) only if the process tree identifies an actual Codex process. It intentionally does not use broad terminal-only variables such as `TMUX`, `WT_SESSION`, `STY`, `SSH_TTY`, or `TERM_SESSION_ID` as a cross-session identity. If no reliable identity exists, fallback state uses the hook process id plus process start time, or a per-process nonce when `/proc` is unavailable, and fails open rather than sharing stale gate state between concurrent sessions in the same terminal or cwd.
-
-## Worktree Scope Isolation
-
-At turn initialization, GAN and Wiki state record the session worktree's resolved root, per-worktree Git dir, shared Git common dir, branch or detached-HEAD label, full HEAD, and a `scope_key` derived from the resolved root plus Git dir. Sibling worktrees share a common dir but have different Git dirs and scope keys; branch is diagnostic metadata, not the sole identity.
-
-At Stop, each gate compares its stored worktree identity with the identity resolved from the current event `cwd`. A mismatch fails open and writes `worktree_scope_mismatch` plus stored/current identities to the per-session trace instead of enforcing stale state. Normal GAN reminder/block messages name the absolute checked root and branch/detached label.
-
-Codex sets `stop_hook_active=true` for a Stop continuation caused by a prior Stop hook. `hook_stop` treats that as a loop guard: it traces the skip and returns before Wiki or GAN enforcement. The first Stop, where the field is false or absent, still evaluates all objective gates. Direct calls to the gate functions continue to block repeatedly while requirements are missing; the loop guard depends on the host-provided continuation field rather than weakening those gates.
-
-### Known Boundaries
-
-- Bash-only file writes are not counted as code telemetry, automatic changed-file compilation, or wiki-ingest evidence because the official payload cannot reliably bind them to an effective worktree/path. Bash validation commands can still be recognized by configured command markers.
-- The harness does not dynamically move a turn's state to a sibling worktree inferred from shell text. Start the Codex session in the intended worktree; independent worktrees remain the supported concurrent workflow.
-- If another process modifies the exact same path declared by the current structured file tool between snapshots, filesystem state cannot identify which writer contributed which lines. Concurrent writes to one worktree are therefore not made safe by this change.
-- Loop prevention requires the host to send `stop_hook_active=true`. A fresh Stop with the field absent or false is intentionally enforced again if objective requirements remain missing.
+Bash-only writes cannot activate the gate because current PostToolUse payloads do not provide a reliable structured effective path for arbitrary commands. If a governed change is made exclusively through Bash, human/agent workflow guidance remains the control; the hook does not guess from command text.
 
 ## Tests
 
-`tests/test_codex_guard.py` covers the 150/300 tiers, ordinary-new-file behavior, non-risky `AGENTS.md`/`SCHEMA.md`, risky hook/CI paths, bootstrap hash deduplication, discussion silence, generated/cache exclusions, session/worktree isolation, structured-path attribution, Bash fail-open boundaries, Stop JSON/loop guard, silent advisory Stop, strict blockers, and lean/legacy PASS review shapes.
+`tests/test_codex_guard.py` covers ordinary large-change silence, no-path early return, structured and parallel path attribution, Bash fail-open behavior, prompt negation, governed paths, generated/guidance exclusions, bootstrap/session/worktree isolation, current artifact binding and freshness, explicit validation evidence, Stop JSON, worktree fail-open, and loop protection.
 
 ## See Also
 
 - [Harness Policy](../config/harness-policy.md)
 - [Stop Enforcement ADR](../decisions/adr-0001-stop-enforcement-policy.md)
-- [Codex Loop Harness Contract](../contracts/2026-07-01-codex-loop-harness.md)
-- [Session Isolation Contract](../contracts/2026-07-01-session-isolation-hardening.md)
-- [Stop JSON Output Contract](../contracts/2026-07-01-stop-json-output.md)
+- [Harness V3 Contract](../contracts/2026-07-13-risk-only-harness-v3.md)
 - [Worktree Scope Isolation Contract](../contracts/2026-07-12-worktree-scope-isolation.md)
-- [Worktree Scope Isolation Review](../reviews/2026-07-12-worktree-scope-isolation-review.md)
 - [Runtime State](../ops/runtime-state.md)

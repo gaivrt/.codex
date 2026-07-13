@@ -1,26 +1,10 @@
-thresholds:
-  contract_net_new_lines: 150
-  review_net_new_lines: 300
-  incremental_reminder_lines: 300
-  new_file_min_lines: 80
-  incremental_new_files: 5
-  large_change_lines: 300
-  large_change_new_files: 999
+policy_version: 3
 
 enforcement:
   default: observe
-  contract_change: remind
-  review_change: remind
-  medium_change: observe
-  large_change: remind
-  risky_change: block
-  harness_self_modification: block
-  missing_contract_for_risky_change: block
-  missing_reviewer_for_risky_change: block
-  missing_validation_for_risky_change: block
-  missing_wiki_ingest: observe
+  missing_governed_artifacts: block
 
-risky_paths:
+governed_paths:
   - "hooks/**"
   - "hooks.json"
   - "harness_policy.yaml"
@@ -32,10 +16,13 @@ risky_paths:
   - "**/*sandbox*"
   - "**/*permission*"
 
-harness_self_paths:
-  - "hooks/**"
-  - "hooks.json"
-  - "harness_policy.yaml"
+governed_path_terms:
+  - "auth"
+  - "authentication"
+  - "authorization"
+  - "oauth"
+  - "oidc"
+  - "sso"
 
 generated_paths:
   - ".git/**"
@@ -53,15 +40,27 @@ generated_paths:
   - "cache/**"
   - "tmp/**"
   - ".tmp/**"
+  - "log/**"
+  - "app-server-control/**"
 
-validation_commands:
-  - "pytest"
-  - "unittest"
-  - "py_compile"
-  - "ruff"
-  - "mypy"
-  - "tsc"
-  - "npm test"
-  - "bun test"
-  - "cargo test"
-  - "go test"
+prompt_risk_terms:
+  - "security"
+  - "安全"
+  - "auth"
+  - "authentication"
+  - "authorization"
+  - "oauth"
+  - "oidc"
+  - "sso"
+  - "permission"
+  - "权限"
+  - "sandbox"
+  - "migration"
+  - "迁移"
+  - "deploy"
+  - "部署"
+  - "ci"
+  - "performance-sensitive"
+  - "性能敏感"
+  - "hook enforcement"
+  - "harness enforcement"

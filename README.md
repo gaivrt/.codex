@@ -11,7 +11,7 @@
 | `AGENTS.md` | Codex bootstrap 纪律和全局工程约定 |
 | `SCHEMA.md` | LLM Wiki 结构、contract/review workflow、ingest/query/lint 规则 |
 | `config.toml` | Codex 主配置：模型、provider、trusted projects、MCP servers、hook trust state |
-| `harness_policy.yaml` | Codex Loop Harness policy：阈值、enforcement modes、risky/generated paths、validation markers |
+| `harness_policy.yaml` | Codex Loop Harness policy：governed/generated paths、prompt risk terms 和 Stop enforcement |
 | `hooks.json` | Codex lifecycle hooks 的入口配置 |
 | `hooks/codex_guard.py` | Codex Loop Harness 主实现 |
 | `rules/default.rules` | 已批准的命令前缀规则 |
@@ -26,7 +26,8 @@
 这个仓库的核心不是单个 hook，而是一套 Codex Loop Harness：
 
 ```text
-Bootstrap -> Contract -> Work -> Verify -> Review -> Ingest -> Trace -> Restart
+Bootstrap -> Ordinary Work
+          -> Governed Contract -> Work -> Verify -> Review -> Ingest
 ```
 
 各层职责：
@@ -35,21 +36,20 @@ Bootstrap -> Contract -> Work -> Verify -> Review -> Ingest -> Trace -> Restart
 |---|---|---|
 | Bootstrap | `AGENTS.md`、session state | 每个 session/worktree 只读一次 `SCHEMA.md` 和 `wiki/index.md`；内容变化时才重读 |
 | Wiki Memory | `SCHEMA.md`、`wiki/index.md`、`wiki/**` | 把长期项目知识写到磁盘，不依赖上下文记忆 |
-| Contract | `wiki/contracts/*.md` | 架构、risky 或至少 150 net-new lines 的任务定义目标和验收边界 |
-| Diff Telemetry | `hooks/codex_guard.py` | 只把 structured file-tool input 明确声明的路径归属给当前 turn |
-| Review | `wiki/reviews/*-review.md` | risky、安全、性能或至少 300 net-new lines 的改动使用 reviewer |
-| Validation | shell command markers + 自动 `py_compile` | 记录测试、lint、typecheck、smoke test 等客观证据 |
-| Trace/Restart | `~/.codex/tmp/hooks/<session_id>/trace.jsonl`、`state.json` | 保存每轮 gate、diff、validation、Stop decision，方便复盘和恢复 |
+| Contract | `wiki/contracts/*.md` | governed implementation 定义目标和验收边界；ordinary work 不创建 |
+| Path Evidence | `hooks/codex_guard.py` | 只使用 structured file-tool input 明确声明的路径，不扫描全仓库 |
+| Review | `wiki/reviews/*-review.md` | governed implementation 在 coherent checkpoint 使用一次 reviewer |
+| Validation | review artifact 中的显式 command/result | 记录与风险相称的客观证据，不推断 shell 历史 |
+| Trace/Restart | `~/.codex/tmp/hooks/<session_id>/trace.jsonl`、turn state | 只记录 governed decision，并在 policy 变化时提示新 session |
 
-Stop enforcement 有三档：
+Stop enforcement 保持最小化：
 
 | 模式 | 行为 |
 |---|---|
-| `observe` | 只写 trace |
-| `remind` | 阈值首次到达时输出一条短提示，不在 Stop 重复 |
-| `block` | Stop 输出 `decision: block` JSON，要求补齐客观 risky-change 缺失项 |
+| `observe` | fail-open，不阻断 |
+| `block` | 仅 governed turn 缺 current contract 或 fresh PASS review 时输出 `decision: block` JSON |
 
-当前 policy 默认静默：普通新文件不单独触发 review，普通 large change 也不会在 Stop 阻断；只有 risky/harness self、安全或性能敏感改动缺少 contract、PASS review 或 validation evidence 时 hard-block。Planning/discussion 不触发 gate，主观质量问题仍交给 reviewer。
+当前 policy 默认静默：行数、普通新文件、planning/discussion、Bash command 和外部操作本身都不触发 gate。只有 governed path，或明确 sensitive implementation request 与 code/config write 同时出现时，才要求短 contract 和一个包含显式 validation evidence 的 current PASS review。
 
 运行 harness 测试：
 

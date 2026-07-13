@@ -1,67 +1,36 @@
 #!/usr/bin/env python3
-"""Codex lifecycle discipline hooks.
+"""Risk-only Codex lifecycle harness.
 
-This is the Codex port of the old Claude Code hook philosophy:
-
-1. Inject the project discipline early.
-2. Track concrete tool-side effects during the turn.
-3. Keep Stop fail-open; reminders must never terminate a turn after ingest.
-
-The implementation stays in one dispatcher because Codex hook handlers are
-cheap command hooks and share the same per-session state files.
+Ordinary work is deliberately silent. The hook expands process only after a
+structured file tool proves that the current turn changed an objectively
+governed path, or after an explicit sensitive implementation request is paired
+with a review-relevant code/config write.
 """
 
 from __future__ import annotations
 
 import json
 import os
-import py_compile
 import re
-import shutil
 import subprocess
 import sys
 import traceback
 from contextlib import contextmanager
-from dataclasses import dataclass, field
 from datetime import datetime
 from fnmatch import fnmatchcase
 from hashlib import sha1
 from pathlib import Path
-from typing import Any, Callable, Iterable
+from typing import Any, Iterable
 
 
-GAN_CONTRACT_LINE_THRESHOLD = 150
-GAN_REVIEW_LINE_THRESHOLD = 300
-GAN_INCREMENTAL_LINE_THRESHOLD = 300
-GAN_NEW_FILE_LINE_THRESHOLD = 80
-GAN_INCREMENTAL_NEW_FILE_THRESHOLD = 5
-GAN_LARGE_LINE_THRESHOLD = 300
-GAN_LARGE_NEW_FILE_THRESHOLD = 999
-
+POLICY_VERSION = 3
 DEFAULT_POLICY: dict[str, Any] = {
-    "thresholds": {
-        "contract_net_new_lines": GAN_CONTRACT_LINE_THRESHOLD,
-        "review_net_new_lines": GAN_REVIEW_LINE_THRESHOLD,
-        "incremental_reminder_lines": GAN_INCREMENTAL_LINE_THRESHOLD,
-        "new_file_min_lines": GAN_NEW_FILE_LINE_THRESHOLD,
-        "incremental_new_files": GAN_INCREMENTAL_NEW_FILE_THRESHOLD,
-        "large_change_lines": GAN_LARGE_LINE_THRESHOLD,
-        "large_change_new_files": GAN_LARGE_NEW_FILE_THRESHOLD,
-    },
+    "policy_version": POLICY_VERSION,
     "enforcement": {
         "default": "observe",
-        "contract_change": "remind",
-        "review_change": "remind",
-        "medium_change": "observe",
-        "large_change": "remind",
-        "risky_change": "block",
-        "harness_self_modification": "block",
-        "missing_contract_for_risky_change": "block",
-        "missing_reviewer_for_risky_change": "block",
-        "missing_validation_for_risky_change": "block",
-        "missing_wiki_ingest": "observe",
+        "missing_governed_artifacts": "block",
     },
-    "risky_paths": [
+    "governed_paths": [
         "hooks/**",
         "hooks.json",
         "harness_policy.yaml",
@@ -73,10 +42,13 @@ DEFAULT_POLICY: dict[str, Any] = {
         "**/*sandbox*",
         "**/*permission*",
     ],
-    "harness_self_paths": [
-        "hooks/**",
-        "hooks.json",
-        "harness_policy.yaml",
+    "governed_path_terms": [
+        "auth",
+        "authentication",
+        "authorization",
+        "oauth",
+        "oidc",
+        "sso",
     ],
     "generated_paths": [
         ".git/**",
@@ -97,17 +69,25 @@ DEFAULT_POLICY: dict[str, Any] = {
         "log/**",
         "app-server-control/**",
     ],
-    "validation_commands": [
-        "pytest",
-        "unittest",
-        "py_compile",
-        "ruff",
-        "mypy",
-        "tsc",
-        "npm test",
-        "bun test",
-        "cargo test",
-        "go test",
+    "prompt_risk_terms": [
+        "security",
+        "安全",
+        "auth",
+        "authentication",
+        "authorization",
+        "oauth",
+        "oidc",
+        "sso",
+        "permission",
+        "权限",
+        "sandbox",
+        "migration",
+        "迁移",
+        "deploy",
+        "部署",
+        "ci",
+        "hook enforcement",
+        "harness enforcement",
     ],
 }
 
@@ -129,39 +109,19 @@ REQUIRED_REVIEW_SECTIONS = (
     "Required fixes before merge",
     "Wiki check",
 )
-LEGACY_REQUIRED_REVIEW_SECTIONS = (
-    "Verdict",
-    "Contract coverage",
-    "Diff risk",
-    "Validation evidence",
-    "Issues",
-    "Required fixes before merge",
-    "Wiki ingest check",
-)
 VALID_REVIEW_VERDICTS = {"PASS", "FAIL", "NEEDS_HUMAN"}
 
-REVIEW_RE = re.compile(r"discriminat|review|审查|critique|reviewer", re.IGNORECASE)
-WIKI_INGEST_RE = re.compile(
-    r"wiki[-_ ]?ingest|"
-    r"ingest\b.{0,80}\b(?:into|to)\s+(?:the\s+)?(?:project\s+)?(?:wiki|knowledge\s+base)|"
-    r"(?:update|write|append|maintain)\s+(?:to\s+)?(?:the\s+)?(?:project\s+)?"
-    r"(?:wiki\s+pages?|wiki/index\.md|wiki/log\.md|wiki|knowledge\s+base)|"
-    r"(?:更新|写入|追加|维护)\s*(?:项目)?(?:wiki\s*页面|wiki/index\.md|wiki/log\.md|wiki|知识库)|"
-    r"吸收.{0,20}(?:到|进|至)\s*(?:wiki|知识库)",
-    re.IGNORECASE | re.DOTALL,
-)
-IMPLEMENT_RE = re.compile(
-    r"实现|新功能|新模块|重构|架构|新增模块|"
-    r"new\s+feature|implement|refactor|new\s+module|architecture|"
-    r"build\s+a|create\s+a\s+(?:new\s+)?(?:module|component|service|system)",
+ACTION_RE = re.compile(
+    r"实现|修改|修复|新增|重构|强化|加固|更改|优化|更新|"
+    r"\b(?:implement|modify|fix|add|refactor|harden|secure|change|optimize|update)\b",
     re.IGNORECASE,
 )
-ARCHITECTURE_RE = re.compile(r"架构|architecture|interface\s+change|接口变更", re.IGNORECASE)
-SENSITIVE_REVIEW_RE = re.compile(
-    r"安全|性能|security|performance|auth|sandbox|permission|deploy|migration|\bci\b",
+NEGATED_ACTION_RE = re.compile(
+    r"(?:不|不要|无需|无须)\s*(?:实现|修改|修复|新增|重构|强化|加固|更改|优化|更新)|"
+    r"\b(?:do\s+not|don't|without)\s+"
+    r"(?:implement|modify|fix|add|refactor|harden|secure|change|optimize|update)\w*\b",
     re.IGNORECASE,
 )
-
 PROJECT_MARKERS = (
     "SCHEMA.md",
     "AGENTS.md",
@@ -172,20 +132,6 @@ PROJECT_MARKERS = (
     "go.mod",
 )
 DOC_DIR_PREFIXES = ("wiki/", "docs/", "reports/")
-GENERATED_DIR_PREFIXES = (
-    ".git/",
-    ".mypy_cache/",
-    ".pytest_cache/",
-    ".ruff_cache/",
-    ".venv/",
-    "__pycache__/",
-    "build/",
-    "data/",
-    "dist/",
-    "node_modules/",
-    "probes/results/",
-    "scratch/",
-)
 DOC_SUFFIXES = {".md", ".rst", ".txt", ".bib"}
 CONFIG_SUFFIXES = {".json", ".toml", ".yaml", ".yml", ".ini", ".cfg", ".lock"}
 CODE_SUFFIXES = {
@@ -224,6 +170,8 @@ CODE_SUFFIXES = {
     ".zsh",
 }
 CODE_FILENAMES = {"Dockerfile", "Makefile", "Rakefile", "Justfile"}
+GUIDANCE_FILENAMES = {"AGENTS.md", "SCHEMA.md"}
+
 ERROR_LOG = Path("/tmp/codex-hook-errors.log")
 STATE_DIR = Path.home() / ".codex" / "tmp" / "hooks"
 UUID_RE = re.compile(
@@ -274,20 +222,7 @@ ENV_SESSION_ID_KEYS = (
     "OPENAI_CODEX_SESSION_ID",
     "OPENAI_CODEX_THREAD_ID",
 )
-
-
-@dataclass
-class ChangeSummary:
-    net_lines: int = 0
-    touched_files: list[str] = field(default_factory=list)
-    new_files: list[str] = field(default_factory=list)
-
-    def extend(self, other: "ChangeSummary") -> None:
-        self.net_lines += other.net_lines
-        for path in other.touched_files:
-            add_unique(self.touched_files, path)
-        for path in other.new_files:
-            add_unique(self.new_files, path)
+HOOK_PROCESS_NONCE: str | None = None
 
 
 def add_unique(items: list[str], item: str) -> None:
@@ -320,7 +255,7 @@ def strip_yaml_comment(line: str) -> str:
 
 
 def parse_simple_yaml(text: str) -> dict[str, Any]:
-    """Parse the small policy YAML subset used by harness_policy.yaml."""
+    """Parse the small YAML subset used by harness_policy.yaml."""
     result: dict[str, Any] = {}
     current_key: str | None = None
     for raw_line in text.splitlines():
@@ -329,18 +264,13 @@ def parse_simple_yaml(text: str) -> dict[str, Any]:
             continue
         indent = len(line) - len(line.lstrip(" "))
         stripped = line.strip()
-
         if indent == 0:
             key, sep, value = stripped.partition(":")
             if not sep:
                 continue
             current_key = key.strip()
-            if value.strip():
-                result[current_key] = parse_policy_scalar(value)
-            else:
-                result[current_key] = {}
+            result[current_key] = parse_policy_scalar(value) if value.strip() else {}
             continue
-
         if current_key is None:
             continue
         container = result.setdefault(current_key, {})
@@ -350,7 +280,6 @@ def parse_simple_yaml(text: str) -> dict[str, Any]:
                 result[current_key] = container
             container.append(parse_policy_scalar(stripped[2:]))
             continue
-
         key, sep, value = stripped.partition(":")
         if sep and isinstance(container, dict):
             container[key.strip()] = parse_policy_scalar(value)
@@ -371,7 +300,7 @@ def merge_policy(default: dict[str, Any], override: dict[str, Any]) -> dict[str,
             merged[key].update(value)
         elif isinstance(value, list):
             merged[key] = list(value)
-        else:
+        elif key in default:
             merged[key] = value
     return merged
 
@@ -379,60 +308,43 @@ def merge_policy(default: dict[str, Any], override: dict[str, Any]) -> dict[str,
 def load_harness_policy(root: Path | None) -> dict[str, Any]:
     if root is None:
         return merge_policy(DEFAULT_POLICY, {})
-    path = root / "harness_policy.yaml"
     try:
-        parsed = parse_simple_yaml(path.read_text(errors="replace"))
+        parsed = parse_simple_yaml((root / "harness_policy.yaml").read_text(errors="replace"))
     except OSError:
         return merge_policy(DEFAULT_POLICY, {})
     return merge_policy(DEFAULT_POLICY, parsed)
 
 
-def threshold(policy: dict[str, Any], name: str) -> int:
-    value = policy.get("thresholds", {}).get(name, DEFAULT_POLICY["thresholds"][name])
-    try:
-        return int(value)
-    except (TypeError, ValueError):
-        return int(DEFAULT_POLICY["thresholds"][name])
-
-
 def enforcement_mode(policy: dict[str, Any], name: str) -> str:
-    mode = str(policy.get("enforcement", {}).get(name) or policy.get("enforcement", {}).get("default") or "remind")
-    return mode if mode in {"observe", "remind", "block"} else "remind"
+    enforcement = policy.get("enforcement") if isinstance(policy.get("enforcement"), dict) else {}
+    mode = str(enforcement.get(name) or enforcement.get("default") or "observe")
+    return mode if mode in {"observe", "remind", "block"} else "observe"
 
 
 def path_matches_any(rel: str, patterns: Iterable[str]) -> str | None:
-    normalized = rel.replace("\\", "/")
-    if normalized.startswith("./"):
-        normalized = normalized[2:]
+    normalized = rel.replace("\\", "/").removeprefix("./")
     for pattern in patterns:
-        pat = str(pattern).replace("\\", "/")
-        if pat.startswith("./"):
-            pat = pat[2:]
-        candidates = [pat]
-        if pat.startswith("**/"):
-            candidates.append(pat[3:])
-        for candidate in candidates:
-            if fnmatchcase(normalized, candidate):
-                return pat
+        pat = str(pattern).replace("\\", "/").removeprefix("./")
+        candidates = [pat, pat[3:]] if pat.startswith("**/") else [pat]
+        if any(fnmatchcase(normalized, candidate) for candidate in candidates):
+            return pat
     return None
 
 
-def risk_flags_for_paths(paths: Iterable[str], policy: dict[str, Any]) -> list[str]:
+def governed_flags_for_paths(paths: Iterable[str], policy: dict[str, Any]) -> list[str]:
     flags: list[str] = []
-    risky_paths = policy.get("risky_paths", [])
-    harness_paths = policy.get("harness_self_paths", [])
+    patterns = policy.get("governed_paths", [])
+    terms = {str(term).lower() for term in policy.get("governed_path_terms", []) if str(term)}
     for rel in paths:
-        harness_match = path_matches_any(rel, harness_paths)
-        if harness_match:
-            add_unique(flags, f"harness_self:{harness_match}")
-        risky_match = path_matches_any(rel, risky_paths)
-        if risky_match:
-            add_unique(flags, f"risky_path:{risky_match}")
+        match = path_matches_any(rel, patterns)
+        if match:
+            add_unique(flags, f"governed_path:{match}")
+            continue
+        tokens = set(re.findall(r"[a-z0-9]+", rel.lower()))
+        term = next((candidate for candidate in terms if candidate in tokens), None)
+        if term:
+            add_unique(flags, f"governed_term:{term}")
     return flags
-
-
-def is_risky_path(rel: str, policy: dict[str, Any]) -> bool:
-    return bool(risk_flags_for_paths([rel], policy))
 
 
 def load_event() -> dict[str, Any]:
@@ -440,8 +352,8 @@ def load_event() -> dict[str, Any]:
     if not raw.strip():
         return {}
     try:
-        data = json.loads(raw)
-        return data if isinstance(data, dict) else {}
+        value = json.loads(raw)
+        return value if isinstance(value, dict) else {}
     except json.JSONDecodeError:
         return {}
 
@@ -459,25 +371,21 @@ def short_hash(value: Any) -> str:
     return sha1(str(value).encode("utf-8", errors="replace")).hexdigest()[:12]
 
 
-HOOK_PROCESS_NONCE: str | None = None
-
-
-def nested_values(data: dict[str, Any], keys: tuple[str, ...], *, include_plain_id: bool = False) -> Iterable[Any]:
+def nested_values(
+    data: dict[str, Any], keys: tuple[str, ...], *, include_plain_id: bool = False
+) -> Iterable[Any]:
     stack: list[tuple[dict[str, Any], bool]] = [(data, False)]
     seen: set[int] = set()
     while stack:
         current, allow_plain_id = stack.pop()
-        obj_id = id(current)
-        if obj_id in seen:
+        if id(current) in seen:
             continue
-        seen.add(obj_id)
-
+        seen.add(id(current))
         search_keys = keys + (("id",) if include_plain_id and allow_plain_id else ())
         for key in search_keys:
             value = current.get(key)
             if value:
                 yield value
-
         for key in NESTED_ID_CONTAINERS:
             nested = current.get(key)
             if isinstance(nested, dict):
@@ -497,102 +405,85 @@ def looks_like_codex_process(argv: list[str]) -> bool:
         return True
     if exe not in {"node", "bun", "deno"}:
         return False
-    for arg in argv[1:6]:
-        name = Path(arg).name.lower()
-        if name == "codex" or name.startswith("codex-") or "codex-cli" in name:
-            return True
-    return False
+    return any(
+        Path(arg).name.lower() == "codex"
+        or Path(arg).name.lower().startswith("codex-")
+        or "codex-cli" in Path(arg).name.lower()
+        for arg in argv[1:6]
+    )
 
 
 def process_start_time(pid: int) -> str | None:
     try:
-        stat_parts = (Path("/proc") / str(pid) / "stat").read_text(errors="replace").split()
+        parts = (Path("/proc") / str(pid) / "stat").read_text(errors="replace").split()
     except OSError:
         return None
-    return stat_parts[21] if len(stat_parts) > 21 else None
+    return parts[21] if len(parts) > 21 else None
 
 
 def codex_process_scope() -> str | None:
-    """Return a Codex process scope only when it is process-specific."""
     pid = os.getppid()
     for _ in range(8):
         if pid <= 1:
             break
         proc = Path("/proc") / str(pid)
         try:
-            cmd_parts = [
+            argv = [
                 part.decode(errors="replace")
                 for part in (proc / "cmdline").read_bytes().split(b"\x00")
                 if part
             ]
-            stat_parts = (proc / "stat").read_text(errors="replace").split()
+            stat = (proc / "stat").read_text(errors="replace").split()
         except OSError:
             break
-
-        start_time = stat_parts[21] if len(stat_parts) > 21 else "0"
-        if looks_like_codex_process(cmd_parts):
-            return safe_id(f"pid{pid}-{start_time}")
-
+        if looks_like_codex_process(argv):
+            return safe_id(f"pid{pid}-{stat[21] if len(stat) > 21 else '0'}")
         try:
-            pid = int(stat_parts[3])
+            pid = int(stat[3])
         except (IndexError, ValueError):
             break
-
     return None
 
 
 def hook_process_scope() -> str:
-    """Return a hook-process lifetime scope for unknown session fallback."""
     pid = os.getpid()
-    start_time = process_start_time(pid)
-    if start_time:
-        return safe_id(f"hookpid{pid}-{start_time}")
-
+    started = process_start_time(pid)
+    if started:
+        return safe_id(f"hookpid{pid}-{started}")
     global HOOK_PROCESS_NONCE
     if HOOK_PROCESS_NONCE is None:
-        entropy = f"{pid}-{datetime.now().isoformat()}-{os.urandom(8).hex()}"
-        HOOK_PROCESS_NONCE = short_hash(entropy)
+        HOOK_PROCESS_NONCE = short_hash(f"{pid}-{datetime.now().isoformat()}-{os.urandom(8).hex()}")
     return safe_id(f"hookpid{pid}-{HOOK_PROCESS_NONCE}")
 
 
 def session_id(data: dict[str, Any]) -> str:
+    base = ""
     for value in nested_values(data, SESSION_ID_KEYS, include_plain_id=True):
         base = safe_id(value)
         if base != "unknown":
             break
-    else:
-        base = ""
-
     if not base:
         for key in ENV_SESSION_ID_KEYS:
-            value = os.environ.get(key)
-            if value:
-                base = safe_id(value)
+            if os.environ.get(key):
+                base = safe_id(os.environ[key])
                 break
-
     if not base:
         for value in nested_values(data, PATH_ID_KEYS):
-            parsed = id_from_path_value(value)
-            if parsed:
-                base = parsed
+            base = id_from_path_value(value) or ""
+            if base:
                 break
-
     if not base:
         for value in nested_values(data, PARENT_ID_KEYS):
             parent = safe_id(value)
             if parent != "unknown":
                 base = f"parent-{parent}"
                 break
-
     if not base:
         base = f"unknown-cwd-{short_hash(cwd_from(data))}"
-
     process_scope = codex_process_scope()
     if process_scope:
         base = f"{base}.{process_scope}"
     elif base.startswith("unknown-cwd-"):
-        # No reliable session/thread/process identity: keep the hook fail-open
-        # rather than sharing state between concurrent terminals in one cwd.
         base = f"{base}.{hook_process_scope()}"
     return safe_id(base)
 
@@ -615,98 +506,16 @@ def session_trace_dir(data: dict[str, Any]) -> Path:
 
 
 def append_trace(data: dict[str, Any], event: str, payload: dict[str, Any]) -> None:
-    record = {
-        "event": event,
-        "time": datetime.now().isoformat(timespec="seconds"),
-        **payload,
-    }
-    path = session_trace_dir(data) / "trace.jsonl"
+    record = {"event": event, "time": datetime.now().isoformat(timespec="seconds"), **payload}
     try:
-        with path.open("a", encoding="utf-8") as handle:
+        with (session_trace_dir(data) / "trace.jsonl").open("a", encoding="utf-8") as handle:
             handle.write(json.dumps(record, ensure_ascii=False) + "\n")
     except OSError:
         pass
 
 
-def write_loop_state(data: dict[str, Any], payload: dict[str, Any]) -> None:
-    path = session_trace_dir(data) / "state.json"
-    current = load_state(path)
-    current.update(payload)
-    current["updated"] = datetime.now().isoformat(timespec="seconds")
-    save_state(path, current)
-
-
 def meta_path(data: dict[str, Any]) -> Path:
     return state_dir() / f"codex-hook-meta-{session_id(data)}.json"
-
-
-def explicit_turn_id(data: dict[str, Any]) -> str | None:
-    for value in nested_values(data, TURN_ID_KEYS):
-        turn = safe_id(value)
-        if turn != "unknown":
-            return turn
-    return None
-
-
-def current_turn_id(data: dict[str, Any]) -> str:
-    explicit = explicit_turn_id(data)
-    if explicit:
-        return explicit
-    meta = load_state(meta_path(data))
-    return safe_id(meta.get("active_turn") or "unknown")
-
-
-def begin_turn(data: dict[str, Any]) -> str:
-    path = meta_path(data)
-    with state_file_lock(path):
-        meta = load_state(path)
-        explicit = explicit_turn_id(data)
-        if explicit:
-            meta["active_turn"] = explicit
-        else:
-            meta["turn_counter"] = int(meta.get("turn_counter", 0)) + 1
-            meta["active_turn"] = str(meta["turn_counter"])
-        save_state(path, meta)
-        return safe_id(meta["active_turn"])
-
-
-def content_hash(path: Path) -> str:
-    try:
-        return sha1(path.read_bytes()).hexdigest()
-    except OSError:
-        return ""
-
-
-def wiki_bootstrap_message(data: dict[str, Any], schema_root: Path, project_root: Path | None) -> str | None:
-    """Emit bootstrap guidance once per session/worktree or content revision."""
-    identity = worktree_identity(project_root or schema_root)
-    current = {
-        "scope_key": identity.get("scope_key", ""),
-        "schema_hash": content_hash(schema_root / "SCHEMA.md"),
-        "index_hash": content_hash(schema_root / "wiki" / "index.md"),
-    }
-    path = meta_path(data)
-    with state_file_lock(path):
-        meta = load_state(path)
-        previous = meta.get("wiki_bootstrap") if isinstance(meta.get("wiki_bootstrap"), dict) else {}
-        meta["wiki_bootstrap"] = current
-        save_state(path, meta)
-
-    if not previous or previous.get("scope_key") != current["scope_key"]:
-        return "Wiki bootstrap: read SCHEMA.md and wiki/index.md once for this worktree."
-
-    changed: list[str] = []
-    if previous.get("schema_hash") != current["schema_hash"]:
-        changed.append("SCHEMA.md")
-    if previous.get("index_hash") != current["index_hash"]:
-        changed.append("wiki/index.md")
-    if changed:
-        return "Wiki changed: re-read " + " and ".join(changed) + "."
-    return None
-
-
-def event_id(data: dict[str, Any], prefix: str) -> Path:
-    return state_dir() / f"{prefix}-{session_id(data)}-{current_turn_id(data)}.json"
 
 
 def load_state(path: Path) -> dict[str, Any]:
@@ -739,10 +548,7 @@ def state_file_lock(path: Path) -> Iterable[None]:
                 fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
             except (ImportError, OSError):
                 pass
-            try:
-                handle.close()
-            except OSError:
-                pass
+            handle.close()
 
 
 def save_state(path: Path, state: dict[str, Any]) -> None:
@@ -758,12 +564,61 @@ def save_state(path: Path, state: dict[str, Any]) -> None:
                 tmp.unlink()
             except OSError:
                 pass
-        pass
+
+
+def explicit_turn_id(data: dict[str, Any]) -> str | None:
+    for value in nested_values(data, TURN_ID_KEYS):
+        turn = safe_id(value)
+        if turn != "unknown":
+            return turn
+    return None
+
+
+def current_turn_id(data: dict[str, Any]) -> str:
+    return explicit_turn_id(data) or safe_id(load_state(meta_path(data)).get("active_turn") or "unknown")
+
+
+def begin_turn(data: dict[str, Any]) -> str:
+    path = meta_path(data)
+    with state_file_lock(path):
+        meta = load_state(path)
+        explicit = explicit_turn_id(data)
+        if explicit:
+            meta["active_turn"] = explicit
+        else:
+            meta["turn_counter"] = int(meta.get("turn_counter", 0)) + 1
+            meta["active_turn"] = str(meta["turn_counter"])
+        save_state(path, meta)
+        return safe_id(meta["active_turn"])
+
+
+def governed_state_path(data: dict[str, Any]) -> Path:
+    return state_dir() / f"governed-v3-{session_id(data)}-{current_turn_id(data)}.json"
+
+
+@contextmanager
+def locked_governed_state(data: dict[str, Any]) -> Iterable[tuple[Path, dict[str, Any]]]:
+    path = governed_state_path(data)
+    with state_file_lock(path):
+        state = load_state(path)
+        state.setdefault("policy_version", POLICY_VERSION)
+        state.setdefault("changed_paths", [])
+        state.setdefault("governed_paths", [])
+        state.setdefault("risk_flags", [])
+        state.setdefault("governed", False)
+        state.setdefault("prompt_risk_signal", False)
+        state.setdefault("prompt_risk_reason", "")
+        state.setdefault("review_snapshot_at_last_edit", {})
+        state.setdefault("nudge_printed", False)
+        state.setdefault("contract_snapshot", {})
+        state.setdefault("review_snapshot", {})
+        yield path, state
+        save_state(path, state)
 
 
 def cwd_from(data: dict[str, Any]) -> Path:
-    cwd = data.get("cwd") or data.get("working_directory") or os.getcwd()
-    return Path(str(cwd)).expanduser().resolve()
+    raw = data.get("cwd") or data.get("working_directory") or os.getcwd()
+    return Path(str(raw)).expanduser().resolve()
 
 
 def parent_chain(path: Path) -> Iterable[Path]:
@@ -778,6 +633,13 @@ def parent_chain(path: Path) -> Iterable[Path]:
 def find_project_root(cwd: Path) -> Path | None:
     for current in parent_chain(cwd):
         if any((current / marker).exists() for marker in PROJECT_MARKERS):
+            return current
+    return None
+
+
+def find_schema_root(cwd: Path) -> Path | None:
+    for current in parent_chain(cwd):
+        if (current / "SCHEMA.md").is_file():
             return current
     return None
 
@@ -810,10 +672,9 @@ def resolve_git_path(root: Path, raw: str) -> str:
 
 
 def worktree_identity(root: Path) -> dict[str, str]:
-    """Return identity fields that distinguish sibling Git worktrees."""
     resolved_root = root.expanduser().resolve()
-    top_level = git_output(resolved_root, "rev-parse", "--show-toplevel")
-    worktree_root = resolve_git_path(resolved_root, top_level) or str(resolved_root)
+    top = git_output(resolved_root, "rev-parse", "--show-toplevel")
+    worktree_root = resolve_git_path(resolved_root, top) or str(resolved_root)
     git_dir = resolve_git_path(resolved_root, git_output(resolved_root, "rev-parse", "--absolute-git-dir"))
     common_dir = resolve_git_path(resolved_root, git_output(resolved_root, "rev-parse", "--git-common-dir"))
     branch = git_output(resolved_root, "symbolic-ref", "--quiet", "--short", "HEAD")
@@ -822,14 +683,13 @@ def worktree_identity(root: Path) -> dict[str, str]:
         branch = "non-git"
     elif not branch:
         branch = f"detached@{head[:12]}" if head else "detached"
-    scope_material = f"{worktree_root}\n{git_dir or 'non-git'}"
     return {
         "root": worktree_root,
         "git_dir": git_dir,
         "common_dir": common_dir,
         "branch": branch,
         "head": head,
-        "scope_key": short_hash(scope_material),
+        "scope_key": short_hash(f"{worktree_root}\n{git_dir or 'non-git'}"),
     }
 
 
@@ -844,39 +704,51 @@ def same_worktree(first: Any, second: Any) -> bool:
 
 def worktree_label(identity: Any, fallback: Path) -> str:
     value = identity if isinstance(identity, dict) else worktree_identity(fallback)
-    root = str(value.get("root") or fallback.resolve())
-    branch = str(value.get("branch") or "unknown")
-    return f"Worktree: {root} ({branch})"
+    return f"Worktree: {value.get('root') or fallback.resolve()} ({value.get('branch') or 'unknown'})"
 
 
-def find_schema_root(cwd: Path) -> Path | None:
-    for current in parent_chain(cwd):
-        if (current / "SCHEMA.md").is_file():
-            return current
-    return None
-
-
-def path_is_relative_to(path: Path, root: Path) -> bool:
+def content_hash(path: Path) -> str:
     try:
-        path.resolve().relative_to(root.resolve())
-        return True
-    except (OSError, ValueError):
-        return False
+        return sha1(path.read_bytes()).hexdigest()
+    except OSError:
+        return ""
 
 
-def rel_for_display(cwd: Path, raw_path: str) -> str:
-    path = resolve_path(cwd, raw_path)
-    try:
-        return path.resolve().relative_to(cwd.resolve()).as_posix()
-    except (OSError, ValueError):
-        return path.as_posix()
-
-
-def resolve_path(cwd: Path, raw_path: str) -> Path:
-    path = Path(raw_path).expanduser()
-    if not path.is_absolute():
-        path = cwd / path
-    return path
+def bootstrap_message(data: dict[str, Any], schema_root: Path, project_root: Path | None) -> str | None:
+    root = project_root or schema_root
+    identity = worktree_identity(root)
+    policy = load_harness_policy(root)
+    current = {
+        "scope_key": identity.get("scope_key", ""),
+        "schema_hash": content_hash(schema_root / "SCHEMA.md"),
+        "index_hash": content_hash(schema_root / "wiki" / "index.md"),
+        "agents_hash": content_hash(root / "AGENTS.md"),
+        "policy_hash": content_hash(root / "harness_policy.yaml"),
+        "policy_version": int(policy.get("policy_version") or POLICY_VERSION),
+    }
+    path = meta_path(data)
+    with state_file_lock(path):
+        meta = load_state(path)
+        previous = meta.get("bootstrap") if isinstance(meta.get("bootstrap"), dict) else {}
+        legacy = meta.get("wiki_bootstrap") if isinstance(meta.get("wiki_bootstrap"), dict) else {}
+        meta["bootstrap"] = current
+        save_state(path, meta)
+    if not previous and legacy.get("scope_key") == current["scope_key"]:
+        return "Harness V3 replaced the active policy; start a new Codex session to drop stale instructions."
+    if not previous or previous.get("scope_key") != current["scope_key"]:
+        return "Wiki bootstrap: read SCHEMA.md and wiki/index.md once for this worktree."
+    if (
+        previous.get("agents_hash") != current["agents_hash"]
+        or previous.get("policy_hash") != current["policy_hash"]
+        or previous.get("policy_version") != current["policy_version"]
+    ):
+        return "Harness policy changed; start a new Codex session so stale AGENTS instructions cannot persist."
+    changed: list[str] = []
+    if previous.get("schema_hash") != current["schema_hash"]:
+        changed.append("SCHEMA.md")
+    if previous.get("index_hash") != current["index_hash"]:
+        changed.append("wiki/index.md")
+    return "Wiki changed: re-read " + " and ".join(changed) + "." if changed else None
 
 
 def tool_name(data: dict[str, Any]) -> str:
@@ -913,7 +785,7 @@ def tool_input(data: dict[str, Any]) -> dict[str, Any]:
         try:
             decoded = json.loads(value)
         except json.JSONDecodeError:
-            return {"cmd": value}
+            return {"command": value}
         return decoded if isinstance(decoded, dict) else {}
     return value if isinstance(value, dict) else {}
 
@@ -932,17 +804,27 @@ def iter_tool_calls(name: str, args: dict[str, Any]) -> Iterable[tuple[str, dict
 
 
 def prompt_text(data: dict[str, Any]) -> str:
-    prompt = data.get("prompt") or data.get("last_user_message") or ""
-    if isinstance(prompt, str):
-        return prompt
-    return json.dumps(prompt, ensure_ascii=False)
+    value = data.get("prompt") or data.get("last_user_message") or ""
+    return value if isinstance(value, str) else json.dumps(value, ensure_ascii=False)
+
+
+def prompt_risk_reason(prompt: str, policy: dict[str, Any]) -> str:
+    actionable = NEGATED_ACTION_RE.sub("", prompt)
+    if not ACTION_RE.search(actionable):
+        return ""
+    lower = actionable.lower()
+    for raw in policy.get("prompt_risk_terms", []):
+        term = str(raw).lower()
+        if term.isascii():
+            if re.search(rf"(?<![a-z0-9]){re.escape(term)}(?![a-z0-9])", lower):
+                return term
+        elif term and term in lower:
+            return term
+    return ""
 
 
 def emit_additional_context(event: str, messages: list[str]) -> None:
     if not messages:
-        return
-    if event == "Stop":
-        print(json.dumps({"systemMessage": "\n".join(messages)}, ensure_ascii=False))
         return
     print(
         json.dumps(
@@ -957,1116 +839,393 @@ def emit_additional_context(event: str, messages: list[str]) -> None:
     )
 
 
-def emit_stop_output(messages: list[tuple[bool, str]]) -> None:
-    if not messages:
-        return
-    text = "\n\n".join(message for _, message in messages if message)
-    if any(blocking for blocking, _ in messages):
-        print(json.dumps({"decision": "block", "reason": text}, ensure_ascii=False))
-    else:
-        print(json.dumps({"systemMessage": text}, ensure_ascii=False))
+def emit_stop_block(reason: str) -> None:
+    print(json.dumps({"decision": "block", "reason": reason}, ensure_ascii=False))
 
 
-def emit_or_collect_stop_message(
-    msg: str,
-    *,
-    blocking: bool,
-    collector: list[tuple[bool, str]] | None,
-) -> None:
-    if collector is not None:
-        collector.append((blocking, msg))
-    elif blocking:
-        print(msg, file=sys.stderr)
-    else:
-        emit_additional_context("Stop", [msg])
+def resolve_path(cwd: Path, raw_path: str) -> Path:
+    path = Path(raw_path).expanduser()
+    return path if path.is_absolute() else cwd / path
 
 
-def count_lines(text: str) -> int:
-    if not text:
-        return 0
-    return text.count("\n") + (0 if text.endswith("\n") else 1)
-
-
-def is_doc_or_config_path(rel: str) -> bool:
-    suffix = Path(rel).suffix.lower()
-    return rel.startswith(DOC_DIR_PREFIXES) or suffix in DOC_SUFFIXES or suffix in CONFIG_SUFFIXES
-
-
-def should_track_gan_path(cwd: Path, raw_path: str) -> bool:
-    if not raw_path:
-        return False
-    path = resolve_path(cwd, raw_path)
-    rel = rel_for_display(cwd, raw_path).replace("\\", "/").lstrip("./")
-    policy = load_harness_policy(cwd)
-    if path_matches_any(rel, policy.get("generated_paths", [])) or rel.startswith(GENERATED_DIR_PREFIXES):
-        return False
-    if is_risky_path(rel, policy):
-        return True
-
-    home_codex = Path.home() / ".codex"
-    if path_is_relative_to(path, home_codex) and not path_is_relative_to(path, home_codex / "hooks"):
-        return False
-
-    if is_doc_or_config_path(rel):
-        return False
-    suffix = Path(rel).suffix.lower()
-    return suffix in CODE_SUFFIXES or Path(rel).name in CODE_FILENAMES
-
-
-def should_track_wiki_code_path(root: Path, raw_path: str) -> bool:
-    path = resolve_path(root, raw_path)
+def rel_in_root(root: Path, cwd: Path, raw_path: str) -> str | None:
     try:
-        rel = path.resolve().relative_to(root.resolve()).as_posix()
+        return resolve_path(cwd, raw_path).resolve().relative_to(root.resolve()).as_posix()
     except (OSError, ValueError):
-        return False
-    return not rel.startswith(("wiki/",)) and should_track_gan_path(root, rel)
-
-
-def should_track_wiki_path(root: Path, raw_path: str) -> bool:
-    path = resolve_path(root, raw_path)
-    try:
-        rel = path.resolve().relative_to(root.resolve()).as_posix()
-    except (OSError, ValueError):
-        return False
-    if rel in {"wiki/index.md", "wiki/log.md"}:
-        return True
-    if rel.startswith("wiki/") and Path(rel).suffix.lower() in DOC_SUFFIXES:
-        return True
-    return should_track_wiki_code_path(root, rel)
-
-
-def git_candidate_paths(root: Path) -> list[str] | None:
-    try:
-        proc = subprocess.run(
-            ["git", "-C", str(root), "ls-files", "--cached", "--others", "--exclude-standard"],
-            text=True,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.DEVNULL,
-            timeout=10,
-            check=False,
-        )
-    except (OSError, subprocess.TimeoutExpired):
         return None
-    if proc.returncode != 0:
-        return None
-    return [line.strip() for line in proc.stdout.splitlines() if line.strip()]
 
 
-def walk_candidate_paths(root: Path) -> list[str]:
+def parse_apply_patch_paths(patch: str) -> list[str]:
     paths: list[str] = []
-    try:
-        iterator = root.rglob("*")
-        for path in iterator:
-            try:
-                rel = path.relative_to(root).as_posix()
-            except ValueError:
-                continue
-            if any(rel == prefix.rstrip("/") or rel.startswith(prefix) for prefix in GENERATED_DIR_PREFIXES):
-                continue
-            if path.is_file():
-                paths.append(rel)
-    except OSError:
-        return paths
+    for line in patch.splitlines():
+        for prefix in ("*** Add File: ", "*** Update File: ", "*** Delete File: "):
+            if line.startswith(prefix):
+                add_unique(paths, line.removeprefix(prefix).strip())
+                break
     return paths
+
+
+def structured_paths(name: str, args: dict[str, Any]) -> list[str]:
+    short = short_tool_name(name).lower()
+    if short in {"write", "edit", "multiedit"}:
+        raw = args.get("file_path") or args.get("path")
+        return [raw] if isinstance(raw, str) and raw else []
+    if short in {"apply_patch", "edit|write"}:
+        patch = args.get("patch") or args.get("input") or args.get("command") or args.get("cmd") or ""
+        return parse_apply_patch_paths(patch) if isinstance(patch, str) else []
+    return []
+
+
+def collect_structured_paths(root: Path, cwd: Path, calls: Iterable[tuple[str, dict[str, Any]]]) -> list[str]:
+    paths: list[str] = []
+    policy = load_harness_policy(root)
+    for name, args in calls:
+        for raw in structured_paths(name, args):
+            rel = rel_in_root(root, cwd, raw)
+            if rel and not path_matches_any(rel, policy.get("generated_paths", [])):
+                add_unique(paths, rel)
+    return paths
+
+
+def is_artifact_path(rel: str) -> bool:
+    return bool(
+        re.fullmatch(r"wiki/contracts/[^/]+\.md", rel)
+        or re.fullmatch(r"wiki/reviews/[^/]+-review\.md", rel)
+    )
+
+
+def is_review_relevant_path(rel: str) -> bool:
+    if is_artifact_path(rel):
+        return False
+    if rel.startswith(DOC_DIR_PREFIXES) or Path(rel).suffix.lower() in DOC_SUFFIXES:
+        return Path(rel).name in GUIDANCE_FILENAMES
+    suffix = Path(rel).suffix.lower()
+    return suffix in CODE_SUFFIXES or suffix in CONFIG_SUFFIXES or Path(rel).name in CODE_FILENAMES
 
 
 def file_fingerprint(path: Path) -> dict[str, Any]:
     try:
         data = path.read_bytes()
     except OSError:
-        return {"exists": False, "lines": 0, "hash": ""}
+        return {"exists": False, "hash": ""}
     return {
         "exists": True,
-        "lines": data.count(b"\n") + (0 if data.endswith(b"\n") or not data else 1),
         "hash": sha1(data).hexdigest(),
     }
 
 
 def artifact_snapshot(root: Path, pattern: str) -> dict[str, dict[str, Any]]:
-    snapshot: dict[str, dict[str, Any]] = {}
+    result: dict[str, dict[str, Any]] = {}
     try:
         paths = sorted(root.glob(pattern))
     except OSError:
-        return snapshot
+        return result
     for path in paths:
-        if not path.is_file():
-            continue
-        try:
-            rel = path.relative_to(root).as_posix()
-        except ValueError:
-            continue
-        snapshot[rel] = file_fingerprint(path)
-    return snapshot
+        if path.is_file():
+            try:
+                result[path.relative_to(root).as_posix()] = file_fingerprint(path)
+            except ValueError:
+                continue
+    return result
 
 
-def candidate_artifacts(root: Path, pattern: str, before: Any, *, changed_only: bool) -> list[Path]:
-    before_map = before if isinstance(before, dict) else {}
+def changed_artifacts(
+    root: Path, pattern: str, before: Any
+) -> list[tuple[Path, dict[str, Any]]]:
+    baseline = before if isinstance(before, dict) else {}
     after = artifact_snapshot(root, pattern)
-    changed: list[Path] = []
-    for rel, fingerprint in after.items():
-        if before_map.get(rel) != fingerprint:
-            changed.append(root / rel)
-    if changed_only and before_map:
-        return changed
-    return changed or [root / rel for rel in sorted(after)]
+    return [
+        (root / rel, fingerprint)
+        for rel, fingerprint in after.items()
+        if not isinstance(baseline.get(rel), dict)
+        or baseline[rel].get("hash") != fingerprint.get("hash")
+    ]
 
 
 def normalize_heading(value: str) -> str:
     return re.sub(r"[^a-z0-9]+", " ", value.lower()).strip()
 
 
-def markdown_sections(text: str) -> set[str]:
-    sections: set[str] = set()
+def markdown_sections(text: str) -> dict[str, str]:
+    sections: dict[str, list[str]] = {}
+    current: str | None = None
     for line in text.splitlines():
         match = re.match(r"^#{1,3}\s+(.+?)\s*$", line)
         if match:
-            sections.add(normalize_heading(match.group(1)))
-    return sections
+            current = normalize_heading(match.group(1))
+            sections.setdefault(current, [])
+        elif current is not None:
+            sections[current].append(line)
+    return {key: "\n".join(lines).strip() for key, lines in sections.items()}
 
 
-def artifact_has_sections(path: Path, required: Iterable[str]) -> bool:
+def read_sections(path: Path) -> dict[str, str]:
     try:
-        text = path.read_text(errors="replace")
+        return markdown_sections(path.read_text(errors="replace"))
     except OSError:
-        return False
-    sections = markdown_sections(text)
-    return all(normalize_heading(item) in sections for item in required)
+        return {}
 
 
-def valid_contract_artifacts(root: Path, before: Any) -> list[str]:
-    valid: list[str] = []
-    for path in candidate_artifacts(root, "wiki/contracts/*.md", before, changed_only=False):
-        if artifact_has_sections(path, REQUIRED_CONTRACT_SECTIONS):
-            try:
-                valid.append(path.relative_to(root).as_posix())
-            except ValueError:
-                valid.append(path.as_posix())
-    return valid
+def contract_is_valid(path: Path) -> bool:
+    sections = read_sections(path)
+    return all(normalize_heading(name) in sections for name in REQUIRED_CONTRACT_SECTIONS)
 
 
-def review_verdict(path: Path) -> str | None:
-    try:
-        text = path.read_text(errors="replace")
-    except OSError:
-        return None
-    match = re.search(r"(?im)^##\s+Verdict\s*\n+\s*(PASS|FAIL|NEEDS_HUMAN)\b", text)
-    if not match:
-        match = re.search(r"(?im)^Verdict\s*:\s*(PASS|FAIL|NEEDS_HUMAN)\b", text)
+def review_verdict(sections: dict[str, str]) -> str | None:
+    value = sections.get(normalize_heading("Verdict"), "")
+    match = re.search(r"\b(PASS|FAIL|NEEDS_HUMAN)\b", value, re.IGNORECASE)
     if not match:
         return None
     verdict = match.group(1).upper()
     return verdict if verdict in VALID_REVIEW_VERDICTS else None
 
 
-def review_artifact_status(root: Path, before: Any) -> dict[str, Any]:
-    statuses: list[dict[str, Any]] = []
-    for path in candidate_artifacts(root, "wiki/reviews/*-review.md", before, changed_only=True):
-        sections_ok = artifact_has_sections(path, REQUIRED_REVIEW_SECTIONS) or artifact_has_sections(
-            path, LEGACY_REQUIRED_REVIEW_SECTIONS
-        )
-        verdict = review_verdict(path)
-        try:
-            rel = path.relative_to(root).as_posix()
-        except ValueError:
-            rel = path.as_posix()
-        statuses.append({"path": rel, "verdict": verdict or "MISSING", "sections_ok": sections_ok})
-    passing = [item["path"] for item in statuses if item["verdict"] == "PASS" and item["sections_ok"]]
-    failing = [item for item in statuses if item["verdict"] in {"FAIL", "NEEDS_HUMAN"}]
-    return {"passing": passing, "failing": failing, "all": statuses}
+def review_contract_path(sections: dict[str, str]) -> str | None:
+    value = sections.get(normalize_heading("Contract"), "")
+    match = re.search(r"wiki/contracts/[A-Za-z0-9._/-]+\.md", value)
+    return match.group(0) if match else None
 
 
-def build_snapshot(root: Path, path_filter: Callable[[Path, str], bool]) -> dict[str, dict[str, Any]]:
-    if not root.exists():
-        return {}
-    candidates = git_candidate_paths(root)
-    if candidates is None:
-        candidates = walk_candidate_paths(root)
-
-    snapshot: dict[str, dict[str, Any]] = {}
-    for rel in sorted(set(candidates)):
-        if not path_filter(root, rel):
-            continue
-        snapshot[rel] = file_fingerprint(root / rel)
-    return snapshot
-
-
-def snapshot_delta(
-    before: dict[str, dict[str, Any]],
-    after: dict[str, dict[str, Any]],
-    *,
-    new_file_min_lines: int,
-) -> ChangeSummary:
-    summary = ChangeSummary()
-    for rel in sorted(set(before) | set(after)):
-        old = before.get(rel, {"exists": False, "lines": 0, "hash": ""})
-        new = after.get(rel, {"exists": False, "lines": 0, "hash": ""})
-        if old == new:
-            continue
-        add_unique(summary.touched_files, rel)
-        old_lines = int(old.get("lines") or 0) if old.get("exists") else 0
-        new_lines = int(new.get("lines") or 0) if new.get("exists") else 0
-        summary.net_lines += max(0, new_lines - old_lines)
-        if not old.get("exists") and new.get("exists") and new_lines >= new_file_min_lines:
-            add_unique(summary.new_files, rel)
-    return summary
-
-
-def parse_apply_patch(
-    cwd: Path,
-    patch: str,
-    *,
-    path_filter: Callable[[Path, str], bool] | None = None,
-    new_file_min_lines: int = 0,
-) -> ChangeSummary:
-    summary = ChangeSummary()
-    current: str | None = None
-    current_is_new = False
-    current_added = 0
-    current_removed = 0
-
-    def included(path: str | None) -> bool:
-        return bool(path) and (path_filter is None or path_filter(cwd, path))
-
-    def finish_current() -> None:
-        nonlocal current, current_is_new, current_added, current_removed
-        if included(current) and current:
-            net = max(0, current_added - current_removed)
-            summary.net_lines += net
-            if current_is_new and current_added >= new_file_min_lines:
-                add_unique(summary.new_files, current)
-        current = None
-        current_is_new = False
-        current_added = 0
-        current_removed = 0
-
-    for line in patch.splitlines():
-        if line.startswith("*** Add File: "):
-            finish_current()
-            current = line.removeprefix("*** Add File: ").strip()
-            current_is_new = True
-            if included(current) and current:
-                add_unique(summary.touched_files, current)
-            continue
-        if line.startswith("*** Update File: "):
-            finish_current()
-            current = line.removeprefix("*** Update File: ").strip()
-            current_is_new = False
-            if included(current) and current:
-                add_unique(summary.touched_files, current)
-            continue
-        if line.startswith("*** Delete File: "):
-            finish_current()
-            current = line.removeprefix("*** Delete File: ").strip()
-            current_is_new = False
-            if included(current) and current:
-                add_unique(summary.touched_files, current)
-            continue
-        if not included(current):
-            continue
-        if line.startswith("+") and not line.startswith("+++"):
-            current_added += 1
-        elif line.startswith("-") and not line.startswith("---"):
-            current_removed += 1
-    finish_current()
-    return summary
-
-
-def summarize_tool_change(
-    cwd: Path,
-    name: str,
-    args: dict[str, Any],
-    path_filter: Callable[[Path, str], bool] | None,
-) -> ChangeSummary:
-    short = short_tool_name(name)
-    summary = ChangeSummary()
-
-    if short == "Write":
-        file_path = args.get("file_path") or args.get("path")
-        content = args.get("content", "")
-        if isinstance(file_path, str) and (path_filter is None or path_filter(cwd, file_path)):
-            add_unique(summary.touched_files, file_path)
-            if isinstance(content, str):
-                n_lines = count_lines(content)
-                summary.net_lines += n_lines
-                if n_lines >= GAN_NEW_FILE_LINE_THRESHOLD:
-                    add_unique(summary.new_files, file_path)
-        return summary
-
-    if short == "Edit":
-        file_path = args.get("file_path") or args.get("path")
-        old = args.get("old_string", "")
-        new = args.get("new_string", "")
-        if isinstance(file_path, str) and (path_filter is None or path_filter(cwd, file_path)):
-            add_unique(summary.touched_files, file_path)
-            if isinstance(old, str) and isinstance(new, str):
-                summary.net_lines += max(0, count_lines(new) - count_lines(old))
-        return summary
-
-    patch = args.get("patch") or args.get("input") or args.get("cmd") or args.get("command") or ""
-    if short in {"apply_patch", "Edit|Write"} or "patch" in args:
-        if isinstance(patch, str):
-            return parse_apply_patch(
-                cwd,
-                patch,
-                path_filter=path_filter,
-                new_file_min_lines=GAN_NEW_FILE_LINE_THRESHOLD,
-            )
-    return summary
-
-
-def evidenced_paths_for_calls(
-    root: Path,
-    session_cwd: Path,
-    calls: list[tuple[str, dict[str, Any]]],
-) -> list[str]:
-    """Return paths evidenced by structured file-tool input.
-
-    Codex's release hook schema does not expose Bash's effective tool workdir,
-    so free-form Bash command text is intentionally never treated as file
-    ownership evidence, even when it happens to contain patch-looking text.
-    """
-    evidenced: list[str] = []
-    for name, args in calls:
-        summary = summarize_tool_change(session_cwd, name, args, path_filter=None)
-        for raw_path in summary.touched_files:
-            path = resolve_path(session_cwd, raw_path)
-            try:
-                rel = path.resolve().relative_to(root.resolve()).as_posix()
-            except (OSError, ValueError):
-                continue
-            add_unique(evidenced, rel)
-    return evidenced
-
-
-def scoped_snapshot_delta(
-    before: dict[str, dict[str, Any]],
-    after: dict[str, dict[str, Any]],
-    evidenced_paths: Iterable[str],
-    *,
-    new_file_min_lines: int,
-) -> ChangeSummary:
-    paths = set(evidenced_paths)
-    if not paths:
-        return ChangeSummary()
-    return snapshot_delta(
-        {rel: value for rel, value in before.items() if rel in paths},
-        {rel: value for rel, value in after.items() if rel in paths},
-        new_file_min_lines=new_file_min_lines,
+def validation_is_explicit(sections: dict[str, str]) -> bool:
+    value = sections.get(normalize_heading("Validation evidence"), "")
+    has_command = bool(re.search(r"(?im)^\s*(?:[-*]\s*)?Command\s*:\s*`?\S+", value))
+    result = re.search(r"(?im)^\s*(?:[-*]\s*)?Result\s*:\s*(.+)$", value)
+    if not result:
+        return False
+    outcome = result.group(1)
+    has_failure = bool(
+        re.search(r"\b(?:FAIL|FAILED|ERROR)\b|\bexit(?:\s+code)?\s*[:=]?\s*[1-9]\d*\b", outcome, re.IGNORECASE)
     )
+    has_success = bool(
+        re.search(r"\b(?:PASS|SUCCESS|OK)\b|\bexit(?:\s+code)?\s*[:=]?\s*0\b", outcome, re.IGNORECASE)
+    )
+    return has_command and has_success and not has_failure
 
 
-def collect_changed_paths(cwd: Path, calls: list[tuple[str, dict[str, Any]]]) -> list[str]:
-    changed: list[str] = []
-    for name, args in calls:
-        summary = summarize_tool_change(cwd, name, args, path_filter=None)
-        for path in summary.touched_files:
-            add_unique(changed, path)
-    return changed
+def evaluate_artifacts(root: Path, state: dict[str, Any]) -> dict[str, Any]:
+    contracts = changed_artifacts(root, "wiki/contracts/*.md", state.get("contract_snapshot"))
+    reviews = changed_artifacts(root, "wiki/reviews/*-review.md", state.get("review_snapshot"))
+    valid_changed_contracts = {
+        path.relative_to(root).as_posix() for path, _ in contracts if contract_is_valid(path)
+    }
+    last_edit_snapshot = state.get("review_snapshot_at_last_edit")
+    if not isinstance(last_edit_snapshot, dict):
+        last_edit_snapshot = {}
+    review_status: list[dict[str, Any]] = []
+    referenced_valid_contracts: set[str] = set()
+    passing: list[str] = []
+    for path, fingerprint in reviews:
+        sections = read_sections(path)
+        rel = path.relative_to(root).as_posix()
+        contract_rel = review_contract_path(sections)
+        contract_ok = bool(contract_rel and contract_rel in valid_changed_contracts)
+        if contract_ok and contract_rel:
+            referenced_valid_contracts.add(contract_rel)
+        headings_ok = all(normalize_heading(name) in sections for name in REQUIRED_REVIEW_SECTIONS)
+        previous_at_edit = last_edit_snapshot.get(rel)
+        fresh = not isinstance(previous_at_edit, dict) or (
+            previous_at_edit.get("hash") != fingerprint.get("hash")
+        )
+        verdict = review_verdict(sections)
+        validation_ok = validation_is_explicit(sections)
+        item = {
+            "path": rel,
+            "verdict": verdict or "MISSING",
+            "headings_ok": headings_ok,
+            "contract": contract_rel or "",
+            "contract_ok": contract_ok,
+            "validation_ok": validation_ok,
+            "fresh": fresh,
+        }
+        review_status.append(item)
+        if verdict == "PASS" and headings_ok and contract_ok and validation_ok and fresh:
+            passing.append(rel)
+    contract_ok = bool(valid_changed_contracts)
+    missing: list[str] = []
+    if not contract_ok:
+        missing.append("contract")
+    if not passing:
+        missing.append("current_pass_review")
+    return {
+        "missing": missing,
+        "contracts": sorted(valid_changed_contracts | referenced_valid_contracts),
+        "passing_reviews": passing,
+        "reviews": review_status,
+    }
 
 
-def init_gan_state(state: dict[str, Any]) -> dict[str, Any]:
-    state.setdefault("prompt_signal", False)
-    state.setdefault("architecture_signal", False)
-    state.setdefault("sensitive_review_signal", False)
-    state.setdefault("total_net_lines", 0)
-    state.setdefault("touched_files", [])
-    state.setdefault("new_files", [])
-    state.setdefault("risk_flags", [])
-    state.setdefault("triggered", False)
-    state.setdefault("contract_required", False)
-    state.setdefault("review_required", False)
-    state.setdefault("large_change", False)
-    state.setdefault("risky_change", False)
-    state.setdefault("contract_nudge_printed", False)
-    state.setdefault("review_nudge_printed", False)
-    state.setdefault("reviewer_called", False)
-    state.setdefault("discriminator_called", False)
-    state.setdefault("validation_seen", False)
-    state.setdefault("validation_commands", [])
-    state.setdefault("contract_files", [])
-    state.setdefault("review_files", [])
-    state.setdefault("team_created", False)
-    state.setdefault("stop_blocks", 0)
-    state.setdefault("lines_since_last_review", 0)
-    state.setdefault("new_files_since_last_review", [])
-    state.setdefault("incremental_nudge_printed", False)
-    state.setdefault("worktree", {})
-    return state
-
-
-def gan_state(data: dict[str, Any]) -> tuple[Path, dict[str, Any]]:
-    path = event_id(data, "gan-hook")
-    state = init_gan_state(load_state(path))
-    return path, state
-
-
-@contextmanager
-def locked_gan_state(data: dict[str, Any]) -> Iterable[tuple[Path, dict[str, Any]]]:
-    path = event_id(data, "gan-hook")
-    with state_file_lock(path):
-        state = init_gan_state(load_state(path))
-        yield path, state
-        save_state(path, state)
-
-
-def init_wiki_state(state: dict[str, Any]) -> dict[str, Any]:
-    state.setdefault("code_files", [])
-    state.setdefault("wiki_files", [])
-    state.setdefault("wiki_pages", [])
-    state.setdefault("wiki_index", False)
-    state.setdefault("wiki_log", False)
-    state.setdefault("wiki_agent_called", False)
-    state.setdefault("stop_blocks", 0)
-    state.setdefault("worktree", {})
-    return state
-
-
-def wiki_state(data: dict[str, Any]) -> tuple[Path, dict[str, Any]]:
-    path = event_id(data, "wiki-hook")
-    state = init_wiki_state(load_state(path))
-    return path, state
-
-
-@contextmanager
-def locked_wiki_state(data: dict[str, Any]) -> Iterable[tuple[Path, dict[str, Any]]]:
-    path = event_id(data, "wiki-hook")
-    with state_file_lock(path):
-        state = init_wiki_state(load_state(path))
-        yield path, state
-        save_state(path, state)
+def initialize_turn(data: dict[str, Any], prompt: str) -> tuple[Path | None, Path | None]:
+    cwd = cwd_from(data)
+    root = find_project_root(cwd)
+    schema_root = find_schema_root(cwd)
+    begin_turn(data)
+    if root:
+        policy = load_harness_policy(root)
+        reason = prompt_risk_reason(prompt, policy)
+        with locked_governed_state(data) as (_, state):
+            state.clear()
+            state.update(
+                {
+                    "policy_version": int(policy.get("policy_version") or POLICY_VERSION),
+                    "project_root": str(root),
+                    "worktree": worktree_identity(root),
+                    "changed_paths": [],
+                    "governed_paths": [],
+                    "risk_flags": [],
+                    "governed": False,
+                    "prompt_risk_signal": bool(reason),
+                    "prompt_risk_reason": reason,
+                    "review_snapshot_at_last_edit": {},
+                    "nudge_printed": False,
+                    "contract_snapshot": artifact_snapshot(root, "wiki/contracts/*.md"),
+                    "review_snapshot": artifact_snapshot(root, "wiki/reviews/*-review.md"),
+                }
+            )
+    return root, schema_root
 
 
 def hook_user_prompt(data: dict[str, Any]) -> int:
-    begin_turn(data)
-    cwd = cwd_from(data)
-    prompt = prompt_text(data)
-    project_root = find_project_root(cwd)
-    schema_root = find_schema_root(cwd)
+    root, schema_root = initialize_turn(data, prompt_text(data))
     messages: list[str] = []
-    implementation_signal = bool(project_root and prompt and IMPLEMENT_RE.search(prompt))
-    architecture_signal = bool(project_root and prompt and ARCHITECTURE_RE.search(prompt))
-    sensitive_review_signal = bool(project_root and prompt and SENSITIVE_REVIEW_RE.search(prompt))
-    classification = "implementation_signal" if implementation_signal else "ordinary"
-
     if schema_root:
-        bootstrap = wiki_bootstrap_message(data, schema_root, project_root)
-        if bootstrap:
-            messages.append(bootstrap)
-
-    if project_root:
-        with locked_gan_state(data) as (_, state):
-            state["prompt_signal"] = implementation_signal
-            state["architecture_signal"] = architecture_signal
-            state["sensitive_review_signal"] = sensitive_review_signal
-            state["project_root"] = str(project_root)
-            state["worktree"] = worktree_identity(project_root)
-            state["last_snapshot"] = build_snapshot(project_root, should_track_gan_path)
-            state["contract_snapshot"] = artifact_snapshot(project_root, "wiki/contracts/*.md")
-            state["review_snapshot"] = artifact_snapshot(project_root, "wiki/reviews/*-review.md")
-
-    if schema_root:
-        with locked_wiki_state(data) as (_, wiki):
-            wiki["schema_root"] = str(schema_root)
-            wiki["worktree"] = worktree_identity(project_root or schema_root)
-            wiki["last_snapshot"] = build_snapshot(schema_root, should_track_wiki_path)
-
-    append_trace(
-        data,
-        "UserPromptSubmit",
-        {
-            "classification": classification,
-            "architecture_signal": architecture_signal,
-            "sensitive_review_signal": sensitive_review_signal,
-            "project_root": str(project_root) if project_root else "",
-            "schema_root": str(schema_root) if schema_root else "",
-        },
-    )
+        message = bootstrap_message(data, schema_root, root)
+        if message:
+            messages.append(message)
     emit_additional_context("UserPromptSubmit", messages)
     return 0
 
 
 def hook_session_start(data: dict[str, Any]) -> int:
     cwd = cwd_from(data)
-    project_root = find_project_root(cwd)
+    root = find_project_root(cwd)
     schema_root = find_schema_root(cwd)
     messages: list[str] = []
-    source = str(data.get("source") or data.get("start_source") or "")
     if schema_root:
-        bootstrap = wiki_bootstrap_message(data, schema_root, project_root)
-        if bootstrap:
-            messages.append(bootstrap)
-    append_trace(
-        data,
-        "SessionStart",
-        {
-            "source": source,
-            "project_root": str(project_root) if project_root else "",
-            "schema_root": str(schema_root) if schema_root else "",
-            "messages": messages,
-        },
-    )
-
+        message = bootstrap_message(data, schema_root, root)
+        if message:
+            messages.append(message)
     emit_additional_context("SessionStart", messages)
     return 0
 
 
-def mark_reviewer_if_needed(state: dict[str, Any], name: str, args: dict[str, Any]) -> bool:
-    short = short_tool_name(name)
-    haystack = f"{name} {json.dumps(args, ensure_ascii=False)}"
-
-    if short in {"TeamCreate", "team_create"}:
-        state["team_created"] = True
-        state["reviewer_called"] = True
-        state["discriminator_called"] = True
-        return True
-
-    reviewer_tool = short in {
-        "Agent",
-        "SendMessage",
-        "Task",
-        "send_input",
-        "spawn_agent",
-        "request_copilot_review",
-    }
-    if reviewer_tool and REVIEW_RE.search(haystack):
-        state["reviewer_called"] = True
-        state["discriminator_called"] = True
-        state["lines_since_last_review"] = 0
-        state["new_files_since_last_review"] = []
-        state["incremental_nudge_printed"] = False
-        return True
-    return False
-
-
-def mark_validation_if_needed(state: dict[str, Any], name: str, args: dict[str, Any], policy: dict[str, Any]) -> bool:
-    short = short_tool_name(name)
-    if short not in {"exec_command", "Bash"}:
-        return False
-    cmd = str(args.get("cmd") or args.get("command") or "")
-    if not cmd:
-        return False
-    haystack = cmd.lower()
-    for marker in policy.get("validation_commands", []):
-        if str(marker).lower() in haystack:
-            state["validation_seen"] = True
-            add_unique(state["validation_commands"], cmd[:240])
-            return True
-    return False
-
-
-def mark_wiki_agent_if_needed(state: dict[str, Any], name: str, args: dict[str, Any]) -> bool:
-    short = short_tool_name(name)
-    wiki_agent_tool = short in {
-        "Agent",
-        "SendMessage",
-        "Task",
-        "send_input",
-        "spawn_agent",
-        "TeamCreate",
-        "team_create",
-    }
-    if not wiki_agent_tool:
-        return False
-
-    haystack = f"{name} {json.dumps(args, ensure_ascii=False)}"
-    if WIKI_INGEST_RE.search(haystack):
-        state["wiki_agent_called"] = True
-        return True
-    return False
-
-
-def track_gan_changes(data: dict[str, Any], calls: list[tuple[str, dict[str, Any]]], cwd: Path) -> tuple[list[str], list[str]]:
-    with locked_gan_state(data) as (_, state):
-        reviewer_seen = False
-        project_root = Path(str(state.get("project_root"))) if state.get("project_root") else find_project_root(cwd)
-        policy = load_harness_policy(project_root or cwd)
-        messages: list[str] = []
-
-        for name, args in calls:
-            if mark_reviewer_if_needed(state, name, args):
-                reviewer_seen = True
-            mark_validation_if_needed(state, name, args, policy)
-
-        change = ChangeSummary()
-        changed_abs: list[str] = []
-        if project_root:
-            before = state.get("last_snapshot")
-            after = build_snapshot(project_root, should_track_gan_path)
-            if not state.get("worktree"):
-                state["worktree"] = worktree_identity(project_root)
-            if isinstance(before, dict):
-                evidenced = evidenced_paths_for_calls(project_root, cwd, calls)
-                change = scoped_snapshot_delta(
-                    before, after, evidenced, new_file_min_lines=threshold(policy, "new_file_min_lines")
-                )
-                changed_abs = [str(project_root / rel) for rel in change.touched_files]
-            state["project_root"] = str(project_root)
-            state["last_snapshot"] = after
-
-        if change.net_lines > 0:
-            state["total_net_lines"] += change.net_lines
-            state["lines_since_last_review"] += change.net_lines
-        for path in change.touched_files:
-            add_unique(state["touched_files"], path)
-        for path in change.new_files:
-            add_unique(state["new_files"], path)
-            add_unique(state["new_files_since_last_review"], path)
-
-        for flag in risk_flags_for_paths(change.touched_files, policy):
-            add_unique(state["risk_flags"], flag)
-
-        state["risky_change"] = bool(state["risk_flags"])
-        state["large_change"] = (
-            state["total_net_lines"] >= threshold(policy, "large_change_lines")
-            or len(state["new_files"]) >= threshold(policy, "large_change_new_files")
-        )
-        has_code_change = bool(state["touched_files"])
-        state["contract_required"] = has_code_change and (
-            state["total_net_lines"] >= threshold(policy, "contract_net_new_lines")
-            or state["risky_change"]
-            or state.get("architecture_signal", False)
-            or state.get("sensitive_review_signal", False)
-        )
-        state["review_required"] = (
-            has_code_change
-            and (
-                state["total_net_lines"] >= threshold(policy, "review_net_new_lines")
-                or state["risky_change"]
-                or state.get("sensitive_review_signal", False)
-            )
-        )
-        state["triggered"] = bool(state["contract_required"] or state["review_required"])
-
-        nudges: list[str] = []
-        if state["contract_required"] and not state.get("contract_nudge_printed"):
-            state["contract_nudge_printed"] = True
-            nudges.append("short contract")
-        if state["review_required"] and not state.get("review_nudge_printed") and not state.get("reviewer_called"):
-            state["review_nudge_printed"] = True
-            nudges.append("review")
-        if nudges:
-            messages.append(
-                f"Harness: {state['total_net_lines']} net new lines; needed: {', '.join(nudges)}."
-            )
-        elif (
-            state.get("review_nudge_printed")
-            and not reviewer_seen
-            and not state.get("incremental_nudge_printed")
-            and (
-                state["lines_since_last_review"] >= threshold(policy, "incremental_reminder_lines")
-                or len(state["new_files_since_last_review"]) >= threshold(policy, "incremental_new_files")
-            )
-        ):
-            state["incremental_nudge_printed"] = True
-            messages.append(
-                f"Harness: {state['lines_since_last_review']} more lines since review; re-review this checkpoint."
-            )
-
-        append_trace(
-            data,
-            "PostToolUse",
-            {
-                "gate": "diff_telemetry",
-                "changed_files": change.touched_files,
-                "delta_lines": change.net_lines,
-                "new_files": change.new_files,
-                "risk_flags": state["risk_flags"],
-                "contract_required": state["contract_required"],
-                "review_required": state["review_required"],
-                "large_change": state["large_change"],
-                "validation_seen": state["validation_seen"],
-                "worktree": state.get("worktree", {}),
-            },
-        )
-        return messages, changed_abs
-
-
-def track_wiki_edits(data: dict[str, Any], calls: list[tuple[str, dict[str, Any]]], cwd: Path) -> list[str]:
-    schema_root = find_schema_root(cwd)
-    if not schema_root:
-        return []
-
-    with locked_wiki_state(data) as (_, state):
-        for name, args in calls:
-            mark_wiki_agent_if_needed(state, name, args)
-
-        root_raw = state.get("schema_root")
-        root = Path(str(root_raw)) if root_raw else schema_root
-        before = state.get("last_snapshot")
-        after = build_snapshot(root, should_track_wiki_path)
-        changed_abs: list[str] = []
-        project_root = find_project_root(root) or root
-        if not state.get("worktree"):
-            state["worktree"] = worktree_identity(project_root)
-        if isinstance(before, dict):
-            evidenced = evidenced_paths_for_calls(root, cwd, calls)
-            summary = scoped_snapshot_delta(before, after, evidenced, new_file_min_lines=0)
-            changed_abs = [str(root / rel) for rel in summary.touched_files]
-            for rel in summary.touched_files:
-                if rel == "wiki/index.md":
-                    add_unique(state["wiki_files"], rel)
-                    state["wiki_index"] = True
-                elif rel == "wiki/log.md":
-                    add_unique(state["wiki_files"], rel)
-                    state["wiki_log"] = True
-                elif rel.startswith("wiki/"):
-                    add_unique(state["wiki_files"], rel)
-                    add_unique(state["wiki_pages"], rel)
-                elif should_track_wiki_code_path(root, rel):
-                    add_unique(state["code_files"], rel)
-        state["schema_root"] = str(root)
-        state["last_snapshot"] = after
-        return changed_abs
-
-
-def compile_python(path: Path) -> str | None:
-    cfile = Path("/tmp") / f"codex-hook-pycompile-{os.getpid()}-{abs(hash(str(path)))}.pyc"
-    try:
-        py_compile.compile(str(path), cfile=str(cfile), doraise=True)
-        return None
-    except py_compile.PyCompileError as exc:
-        return f"Validation failed: `{path}` does not py_compile: {exc.msg}"
-    except OSError as exc:
-        return f"Validation skipped: could not read `{path}`: {exc}"
-    finally:
-        try:
-            cfile.unlink()
-        except OSError:
-            pass
-
-
-def maybe_compile_changed_files(cwd: Path, changed_paths: list[str]) -> list[str]:
-    messages: list[str] = []
-    py_paths: list[Path] = []
-    ts_seen = False
-
-    for raw in changed_paths:
-        path = resolve_path(cwd, raw)
-        suffix = path.suffix.lower()
-        if suffix == ".py" and path.is_file():
-            py_paths.append(path)
-        elif suffix in {".ts", ".tsx"}:
-            ts_seen = True
-
-    for path in py_paths:
-        failure = compile_python(path)
-        if failure:
-            messages.append(failure)
-
-    if ts_seen:
-        tsc = cwd / "node_modules" / ".bin" / "tsc"
-        cmd = [str(tsc), "--noEmit"] if tsc.exists() else None
-        if cmd is None and shutil.which("tsc"):
-            cmd = ["tsc", "--noEmit"]
-        if cmd is None:
-            messages.append("Validation skipped: TypeScript changed but no local/global `tsc` was found.")
-        else:
-            try:
-                proc = subprocess.run(
-                    cmd,
-                    cwd=str(cwd),
-                    text=True,
-                    stdout=subprocess.PIPE,
-                    stderr=subprocess.PIPE,
-                    timeout=30,
-                    check=False,
-                )
-                if proc.returncode != 0:
-                    output = (proc.stderr or proc.stdout).strip().splitlines()
-                    snippet = "\n".join(output[:8])
-                    messages.append(f"Validation failed: `{' '.join(cmd)}` exited {proc.returncode}:\n{snippet}")
-            except (OSError, subprocess.TimeoutExpired) as exc:
-                messages.append(f"Validation skipped: TypeScript check could not run: {exc}")
-    return messages
-
-
 def hook_post_tool(data: dict[str, Any]) -> int:
     cwd = cwd_from(data)
-    calls = list(iter_tool_calls(tool_name(data), tool_input(data)))
-    messages: list[str] = []
-
-    changed_paths = track_wiki_edits(data, calls, cwd)
-    gan_messages, gan_changed_paths = track_gan_changes(data, calls, cwd)
-    changed_paths.extend(gan_changed_paths)
-    messages.extend(gan_messages)
-    validation_messages = maybe_compile_changed_files(cwd, changed_paths)
-    messages.extend(validation_messages)
-    if validation_messages:
-        append_trace(
-            data,
-            "Validation",
-            {
-                "changed_paths": changed_paths,
-                "messages": validation_messages,
-            },
-        )
-    _, gan = gan_state(data)
-    _, wiki = wiki_state(data)
-    write_loop_state(
-        data,
-        {
-            "repo": str(find_project_root(cwd) or cwd),
-            "changed_files": gan.get("touched_files", []),
-            "net_new_code_lines": gan.get("total_net_lines", 0),
-            "new_files": len(gan.get("new_files", [])),
-            "risk_flags": gan.get("risk_flags", []),
-            "contract_required": gan.get("contract_required", False),
-            "review_required": gan.get("review_required", False),
-            "review_seen": gan.get("reviewer_called", False),
-            "validation_seen": gan.get("validation_seen", False),
-            "wiki_ingest_needed": bool(wiki.get("code_files")),
-            "wiki_ingest_seen": bool(wiki.get("wiki_pages") and wiki.get("wiki_index") and wiki.get("wiki_log")),
-        },
-    )
-    emit_additional_context("PostToolUse", messages)
-    return 0
-
-
-def enforce_wiki(
-    data: dict[str, Any],
-    cwd: Path,
-    *,
-    block: bool = False,
-    stop_messages: list[tuple[bool, str]] | None = None,
-) -> int:
-    schema_root = find_schema_root(cwd)
-    if not schema_root:
+    root = find_project_root(cwd)
+    if root is None:
         return 0
-    policy = load_harness_policy(schema_root)
-    with locked_wiki_state(data) as (_, state):
-        stored_identity = state.get("worktree")
-        current_root = find_project_root(cwd) or schema_root
-        current_identity = worktree_identity(current_root)
-        if stored_identity and not same_worktree(stored_identity, current_identity):
-            append_trace(
-                data,
-                "Stop",
-                {
-                    "gate": "Wiki",
-                    "result": "pass",
-                    "reason": "worktree_scope_mismatch",
-                    "stored_worktree": stored_identity,
-                    "current_worktree": current_identity,
-                },
-            )
-            return 0
-        state["worktree"] = current_identity
-        code_files = state.get("code_files", [])
-        if not code_files:
-            append_trace(data, "Stop", {"gate": "Wiki", "result": "pass", "reason": "no_code_files"})
-            return 0
-
-        missing: list[str] = []
-        if not state.get("wiki_pages"):
-            missing.append("wiki pages not updated")
-        if not state.get("wiki_index"):
-            missing.append("wiki/index.md not updated")
-        if not state.get("wiki_log"):
-            missing.append("wiki/log.md not updated")
-        if not missing:
-            append_trace(data, "Stop", {"gate": "Wiki", "result": "pass", "code_files": code_files})
-            return 0
-
-        mode = "block" if block else enforcement_mode(policy, "missing_wiki_ingest")
-        if mode == "observe":
-            append_trace(data, "Stop", {"gate": "Wiki", "result": "observe", "missing": missing})
-            return 0
-        label = "Required" if mode == "block" else "Reminder"
-        suffix = (
-            "if this is genuinely trivial, the next Stop only reminds."
-            if mode == "block"
-            else "then continue the original task; this Stop hook is reminder-only."
-        )
-        if state.get("wiki_agent_called"):
-            action = (
-                "A wiki-ingest subagent was called; integrate or verify its output so "
-                "wiki pages, wiki/index.md, and wiki/log.md are updated; "
-            )
-        else:
-            action = (
-                "Delegate this to a wiki-ingest subagent to update wiki pages, "
-                "wiki/index.md, and wiki/log.md; "
-            )
-        msg = (
-            f"[Wiki Ingest {label}] Code edited: "
-            + ", ".join(code_files[:5])
-            + ". Missing: "
-            + "; ".join(missing)
-            + ". "
-            + action
-            + suffix
-        )
-        if mode == "block":
-            state["stop_blocks"] = state.get("stop_blocks", 0) + 1
-            rc = 2
-        else:
-            state["stop_reminders"] = state.get("stop_reminders", 0) + 1
-            rc = 0
-    append_trace(
-        data,
-        "Stop",
-        {
-            "gate": "Wiki",
-            "result": "blocked" if rc == 2 else mode,
-            "missing": missing,
-            "code_files": code_files,
-        },
-    )
-    emit_or_collect_stop_message(msg, blocking=mode == "block", collector=stop_messages)
-    return rc
-
-
-def evaluate_stop_requirements(root: Path, state: dict[str, Any], policy: dict[str, Any]) -> dict[str, Any]:
-    contract_files = valid_contract_artifacts(root, state.get("contract_snapshot"))
-    review_status = review_artifact_status(root, state.get("review_snapshot"))
-    review_files = review_status.get("passing", [])
-    failing_reviews = review_status.get("failing", [])
-    strict_change = bool(state.get("risky_change") or state.get("sensitive_review_signal"))
-    contract_required = bool(state.get("contract_required"))
-    review_required = bool(state.get("review_required"))
-
-    missing: list[str] = []
-    blockers: list[str] = []
-    if contract_required and not contract_files:
-        missing.append("contract")
-        if strict_change and enforcement_mode(policy, "missing_contract_for_risky_change") == "block":
-            blockers.append("missing_contract")
-    if review_required and not review_files:
-        missing.append("review_artifact")
-        if strict_change and enforcement_mode(policy, "missing_reviewer_for_risky_change") == "block":
-            blockers.append("missing_review")
-    if strict_change and failing_reviews:
-        missing.append("passing_review")
-        blockers.append("review_not_passed")
-    if strict_change and not state.get("validation_seen"):
-        missing.append("validation_evidence")
-        if enforcement_mode(policy, "missing_validation_for_risky_change") == "block":
-            blockers.append("missing_validation")
-
-    state["contract_files"] = contract_files
-    state["review_files"] = review_files
-    return {
-        "strict_change": strict_change,
-        "contract_required": contract_required,
-        "review_required": review_required,
-        "missing": missing,
-        "blockers": blockers,
-        "contract_files": contract_files,
-        "review_files": review_files,
-        "review_status": review_status,
-    }
-
-
-def enforce_gan(
-    data: dict[str, Any],
-    cwd: Path,
-    *,
-    stop_messages: list[tuple[bool, str]] | None = None,
-) -> int:
-    with locked_gan_state(data) as (_, state):
-        if not state.get("triggered"):
-            append_trace(data, "Stop", {"gate": "GAN", "result": "pass", "reason": "not_triggered"})
-            return 0
-
+    calls = list(iter_tool_calls(tool_name(data), tool_input(data)))
+    paths = collect_structured_paths(root, cwd, calls)
+    if not paths:
+        return 0
+    with locked_governed_state(data) as (_, state):
         root_raw = state.get("project_root")
-        root = Path(str(root_raw)) if root_raw else find_project_root(cwd)
-        if root is None:
-            append_trace(data, "Stop", {"gate": "GAN", "result": "pass", "reason": "no_project_root"})
-            return 0
-        stored_identity = state.get("worktree")
-        current_root = find_project_root(cwd)
-        current_identity = worktree_identity(current_root or root)
-        if stored_identity and not same_worktree(stored_identity, current_identity):
-            append_trace(
-                data,
-                "Stop",
-                {
-                    "gate": "GAN",
-                    "result": "pass",
-                    "reason": "worktree_scope_mismatch",
-                    "stored_worktree": stored_identity,
-                    "current_worktree": current_identity,
-                },
-            )
-            return 0
-        state["worktree"] = current_identity
+        stored_root = Path(str(root_raw)) if root_raw else root
+        if stored_root.resolve() != root.resolve():
+            root = stored_root
+            paths = collect_structured_paths(root, cwd, calls)
+            if not paths:
+                return 0
+        state.setdefault("project_root", str(root))
+        state.setdefault("worktree", worktree_identity(root))
         policy = load_harness_policy(root)
-
-        requirements = evaluate_stop_requirements(root, state, policy)
-        if not requirements["strict_change"]:
-            append_trace(
-                data,
-                "Stop",
-                {
-                    "gate": "GAN",
-                    "result": "pass",
-                    "reason": "advisory_change_stop_is_silent",
-                    "missing": requirements["missing"],
-                    "risk_flags": state.get("risk_flags", []),
-                },
+        for rel in paths:
+            add_unique(state["changed_paths"], rel)
+        relevant = [rel for rel in paths if is_review_relevant_path(rel)]
+        flags = governed_flags_for_paths(paths, policy)
+        prompt_trigger = bool(state.get("prompt_risk_signal") and relevant)
+        if flags or prompt_trigger:
+            for rel in relevant or paths:
+                add_unique(state["governed_paths"], rel)
+            for flag in flags:
+                add_unique(state["risk_flags"], flag)
+            if prompt_trigger:
+                add_unique(state["risk_flags"], f"prompt:{state.get('prompt_risk_reason')}")
+            first = not state.get("governed")
+            state["governed"] = True
+            if first:
+                append_trace(
+                    data,
+                    "GovernedChange",
+                    {
+                        "paths": state["governed_paths"],
+                        "risk_flags": state["risk_flags"],
+                        "worktree": state.get("worktree", {}),
+                    },
+                )
+        if state.get("governed") and relevant:
+            state["review_snapshot_at_last_edit"] = artifact_snapshot(
+                root, "wiki/reviews/*-review.md"
             )
-            return 0
-        if not requirements["missing"]:
-            append_trace(
-                data,
-                "Stop",
-                {
-                    "gate": "GAN",
-                    "result": "pass",
-                    "reason": "strict_requirements_satisfied",
-                    "risk_flags": state.get("risk_flags", []),
-                },
+        if state.get("governed") and not state.get("nudge_printed"):
+            state["nudge_printed"] = True
+            emit_additional_context(
+                "PostToolUse",
+                ["Harness V3: governed change detected; finish with a short contract and one current PASS review."],
             )
-            return 0
-        mode = "block" if requirements["blockers"] else "observe"
-        if mode != "block":
-            append_trace(
-                data,
-                "Stop",
-                {"gate": "GAN", "result": "observe", "missing": requirements["missing"]},
-            )
-            return 0
-        msg = (
-            f"[Harness block] Risky change missing: {', '.join(requirements['missing'])}. "
-            f"{worktree_label(state.get('worktree'), root)}"
-        )
-        if mode == "block":
-            state["stop_blocks"] = state.get("stop_blocks", 0) + 1
-            rc = 2
-        else:
-            state["stop_reminders"] = state.get("stop_reminders", 0) + 1
-            rc = 0
-    append_trace(
-        data,
-        "Stop",
-        {
-            "gate": "GAN",
-            "result": "blocked" if rc == 2 else mode,
-            "missing": requirements["missing"],
-            "blockers": requirements["blockers"],
-            "risk_flags": state.get("risk_flags", []),
-            "contract_files": requirements["contract_files"],
-            "review_files": requirements["review_files"],
-            "validation_seen": state.get("validation_seen", False),
-        },
-    )
-    emit_or_collect_stop_message(msg, blocking=mode == "block", collector=stop_messages)
-    return rc
+    return 0
 
 
 def hook_stop(data: dict[str, Any]) -> int:
     if data.get("stop_hook_active") is True:
+        append_trace(data, "Stop", {"result": "pass", "reason": "stop_hook_active"})
+        return 0
+    cwd = cwd_from(data)
+    with locked_governed_state(data) as (_, state):
+        if not state.get("governed"):
+            return 0
+        root_raw = state.get("project_root")
+        root = Path(str(root_raw)) if root_raw else find_project_root(cwd)
+        if root is None:
+            return 0
+        stored = state.get("worktree")
+        current_root = find_project_root(cwd) or root
+        current = worktree_identity(current_root)
+        if stored and not same_worktree(stored, current):
+            append_trace(
+                data,
+                "Stop",
+                {
+                    "result": "pass",
+                    "reason": "worktree_scope_mismatch",
+                    "stored_worktree": stored,
+                    "current_worktree": current,
+                },
+            )
+            return 0
+        policy = load_harness_policy(root)
+        evidence = evaluate_artifacts(root, state)
+        if not evidence["missing"]:
+            append_trace(
+                data,
+                "Stop",
+                {
+                    "result": "pass",
+                    "reason": "governed_requirements_satisfied",
+                    "contracts": evidence["contracts"],
+                    "reviews": evidence["passing_reviews"],
+                },
+            )
+            return 0
+        mode = enforcement_mode(policy, "missing_governed_artifacts")
+        if mode != "block":
+            append_trace(data, "Stop", {"result": mode, "missing": evidence["missing"]})
+            return 0
+        reason = (
+            f"[Harness V3 block] Governed change missing: {', '.join(evidence['missing'])}. "
+            f"Add/update one short contract and a fresh PASS review linked to it, then continue. "
+            f"{worktree_label(stored, root)}"
+        )
         append_trace(
             data,
             "Stop",
-            {"gate": "loop_guard", "result": "pass", "reason": "stop_hook_active"},
+            {
+                "result": "blocked",
+                "missing": evidence["missing"],
+                "risk_flags": state.get("risk_flags", []),
+                "reviews": evidence["reviews"],
+            },
         )
-        return 0
-    cwd = cwd_from(data)
-    stop_messages: list[tuple[bool, str]] = []
-    enforce_wiki(data, cwd, block=False, stop_messages=stop_messages)
-    enforce_gan(data, cwd, stop_messages=stop_messages)
-    emit_stop_output(stop_messages)
+        emit_stop_block(reason)
     return 0
 
 
@@ -2085,9 +1244,9 @@ def main() -> int:
         return 0
     except Exception:
         try:
-            with ERROR_LOG.open("a", encoding="utf-8") as f:
-                f.write(f"\n## {datetime.now().isoformat()} event={event}\n")
-                f.write(traceback.format_exc())
+            with ERROR_LOG.open("a", encoding="utf-8") as handle:
+                handle.write(f"\n## {datetime.now().isoformat()} event={event}\n")
+                handle.write(traceback.format_exc())
         except OSError:
             pass
         return 0

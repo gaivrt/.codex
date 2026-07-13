@@ -1,7 +1,7 @@
 ---
 title: Wiki Index
 type: project-overview
-updated: 2026-07-12 23:06
+updated: 2026-07-13 13:46
 sources:
   - SCHEMA.md
   - README.md
@@ -19,11 +19,11 @@ sources:
 
 - [Codex Configuration](config/codex-config.md) — Codex 模型/provider/MCP/trusted projects/hooks trust/rules 的配置摘要。
 - [Git Boundaries](config/git-boundaries.md) — Git 与 wiki 的长期维护边界、`.gitignore` 排除类别和协作规则。
-- [Harness Policy](config/harness-policy.md) — Lean Harness 的 150/300 阈值、silent/advisory/strict enforcement、risky/generated paths 和 validation markers。
+- [Harness Policy](config/harness-policy.md) — Harness V3 的 governed/generated paths、prompt risk terms 和单一 objective Stop gate。
 
 ## Hooks
 
-- [Codex Loop Harness](hooks/codex-guard.md) — 一次性 wiki bootstrap、tool-evidenced telemetry、lean process tiers、worktree isolation 和 strict-risk Stop enforcement。
+- [Codex Loop Harness](hooks/codex-guard.md) — hash bootstrap、structured path evidence、risk-only current artifact gate、worktree isolation 和 sparse trace。
 
 ## Contracts
 
@@ -32,6 +32,7 @@ sources:
 - [Stop JSON Output Contract](contracts/2026-07-01-stop-json-output.md) — 修复 Stop hook invalid JSON output 的 contract，规定 reminder/block 的 JSON 输出形状。
 - [Worktree Scope Isolation Contract](contracts/2026-07-12-worktree-scope-isolation.md) — 修复跨 worktree 文件误归属与 Stop continuation 循环的 scope、wire-format 边界和验收标准。
 - [Lean Harness Contract](contracts/2026-07-12-lean-harness.md) — 将日常路径改为静默、contract/reviewer 改为 150/300 分层并收紧 strict Stop blocker 的验收边界。
+- [Harness V3 Contract](contracts/2026-07-13-risk-only-harness-v3.md) — 删除 line-count ceremony、repo snapshots 与 command surveillance，改为 risk-only governed contract/review 的验收边界。
 
 ## Reviews
 
@@ -40,6 +41,7 @@ sources:
 - [Stop JSON Output Review](reviews/2026-07-01-stop-json-output-review.md) — reviewer 对 Stop JSON 输出修复的结构化 PASS 审查，记录 invalid JSON failure mode 的验证。
 - [Worktree Scope Isolation Review](reviews/2026-07-12-worktree-scope-isolation-review.md) — reviewer 对 worktree identity、tool-evidenced attribution、Bash fail-open 和 Stop loop guard 的结构化 PASS 审查。
 - [Lean Harness Review](reviews/2026-07-12-lean-harness-review.md) — 150/300 分层、一次性 bootstrap、ordinary silent Stop 与 strict-risk blocker 的精简 PASS 审查。
+- [Harness V3 Review](reviews/2026-07-13-risk-only-harness-v3-review.md) — reviewer 验证 risk classifier、content-hash artifact freshness、validation result、ordinary silent path 与 fail-open boundaries 后给出的 PASS 审查。
 
 ## Skills
 
@@ -55,7 +57,7 @@ sources:
 
 ## Decisions
 
-- [ADR-0001 Stop Enforcement Policy](decisions/adr-0001-stop-enforcement-policy.md) — 默认静默、size-only advisory、仅 strict-risk objective omissions hard-block 的 Stop 策略。
+- [ADR-0001 Stop Enforcement Policy](decisions/adr-0001-stop-enforcement-policy.md) — 放弃 size-only process，采用 risk-only governed evidence、current artifact binding/freshness 和 external-op 分离的 Stop 策略。
 
 ## See Also
 

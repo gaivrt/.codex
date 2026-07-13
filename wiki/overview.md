@@ -1,7 +1,7 @@
 ---
 title: Codex Home Overview
 type: project-overview
-updated: 2026-07-12 22:59
+updated: 2026-07-13 13:29
 sources:
   - SCHEMA.md
   - AGENTS.md
@@ -26,13 +26,13 @@ sources:
 
 | 路径 | 角色 |
 |---|---|
-| `AGENTS.md` | 精简的全局行为约定：session bootstrap、lean gate、artifact ownership、wiki ingest、安全与工程规则 |
+| `AGENTS.md` | 全局行为约定：session bootstrap、risk-only gate、artifact ownership、wiki ingest、安全与工程规则 |
 | `README.md` | 仓库说明、提交边界、常用 Git 检查命令 |
 | `.gitignore` | 排除 secrets、runtime state、cache、standalone binaries、备份文件 |
 | `config.toml` | Codex 主配置：模型、provider、trusted projects、MCP servers、hook trust state |
 | `hooks.json` | Codex lifecycle hooks 入口配置 |
-| `harness_policy.yaml` | Codex Loop Harness policy：阈值、enforcement modes、risky/generated paths、validation markers |
-| `hooks/codex_guard.py` | Lean Harness 主实现：一次性 wiki bootstrap、tool-evidenced telemetry、150/300 process tiers、strict-risk Stop gate、trace/restart |
+| `harness_policy.yaml` | Harness V3 policy：governed/generated paths、prompt risk terms 和单一 Stop enforcement |
+| `hooks/codex_guard.py` | Risk-only Harness 主实现：hash bootstrap、structured path evidence、current artifact gate、worktree isolation 和 sparse trace |
 | `rules/default.rules` | 已批准的命令前缀规则 |
 | `skills/.system/` | 安装的 system skills、引用文档、脚本和资产 |
 | `tests/test_codex_guard.py` | harness 行为测试 |
@@ -55,8 +55,8 @@ sources:
 
 - [Codex Configuration](config/codex-config.md) records model/provider defaults, MCP servers, trusted projects, hook trust hashes, and approved command prefixes.
 - [Git Boundaries](config/git-boundaries.md) records what belongs in Git/wiki and what must remain local runtime state.
-- [Harness Policy](config/harness-policy.md) records thresholds, enforcement modes, risky/generated paths, and validation markers.
-- [Codex Loop Harness](hooks/codex-guard.md) records lifecycle hook events, contract/review gates, diff telemetry, validation, trace/restart, and Stop enforcement.
+- [Harness Policy](config/harness-policy.md) records governed/generated paths, prompt risk terms, and the single hard enforcement mode.
+- [Codex Loop Harness](hooks/codex-guard.md) records lifecycle events, structured path evidence, current artifact binding/freshness, sparse trace, and Stop enforcement.
 - [Codex Loop Harness Contract](contracts/2026-07-01-codex-loop-harness.md) records the implementation contract for the current harness upgrade.
 - [ADR-0001 Stop Enforcement Policy](decisions/adr-0001-stop-enforcement-policy.md) records the enforcement decision for observe/remind/block behavior.
 - [System Skills](skills/system-skills.md) indexes the installed system skills and their key scripts/references.
@@ -68,17 +68,19 @@ sources:
 Wiki 负责维护这个目录的长期知识：
 
 - 配置意图：为什么 `config.toml`、`hooks.json`、`rules/default.rules` 这样设置。
-- Hook 行为：`codex_guard.py` 如何追踪 loop discipline、contract/review artifacts、validation evidence、trace 和 Stop enforcement。
+- Hook 行为：`codex_guard.py` 如何识别 governed changes、绑定 current contract/review、维护隔离 state 和执行 Stop enforcement。
 - Skill 索引：每个 skill 的目的、触发条件、入口和重要脚本。
 - 模板说明：`templates/` 中的可复用模板如何使用。
 - 运行维护：哪些文件是运行态，哪些文件应该被 Git 和 wiki 排除。
 - 决策记录：影响未来维护的 durable decisions。
 
-## Lean Maintenance Model
+## Risk-Only Maintenance Model
 
 - 每个 session/worktree 首次非 trivial 工作读取 `SCHEMA.md` 与 `wiki/index.md`；内容和 scope 未变化时不重复读取。
-- 普通 `<150` 行代码改动无 contract/reviewer；`>=150` 行需要短 contract，`>=300` 行需要 review，但 size-only Stop 保持静默。
-- Hook enforcement/policy、auth、sandbox、permission、migration、deploy 和 CI 等 strict-risk 改动缺 contract、validation 或 current PASS review 时才 hard-block。
+- 普通改动无论大小都不需要 contract/reviewer；迭代期运行 targeted test，coherent checkpoint 再运行一次 related suite。
+- Hook enforcement/policy、auth、sandbox、permission、migration、deploy、CI，或明确 sensitive implementation intent 配合 code/config write 时进入 governed workflow。
+- Governed Stop 只检查本轮 content-changed contract，以及绑定该 contract、内容晚于最后实施编辑快照并含无冲突成功 validation command/result 的 current PASS review；mtime/touch 不算 freshness。
+- 外部操作的授权、scope/budget 和执行回执独立处理，不因操作本身创建 code review artifact。
 - 小而集中的 durable knowledge 由主 agent 直接 ingest；大型或跨模块 ingest 才委托 subagent。
 - Contract 定义目标，review 保存结论和证据，wiki 只维护当前行为，log 只追加一条简洁历史记录。
 
